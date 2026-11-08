@@ -1,0 +1,2283 @@
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+000
+001
+      AUDITING FACT D ELETION IN L ANGUAGE M ODELS
+002   WITH S EPARABLE M EMORY
+003
+004
+005     Anonymous authors
+006     Paper under double-blind review
+007
+008
+009                                                                             A BSTRACT
+010
+011
+                     Language models with separable memory aim to decouple source-specific knowl-
+012                  edge from general world knowledge, language understanding and reasoning ca-
+013                  pabilities. Unlearning then becomes relatively straightforward: simply delete the
+014                  memory units associated with the targeted knowledge. We show that a naive com-
+015                  parison of model outputs is an unreliable measure of unlearnability, and propose a
+016                  methodological audit for such systems that measures the effectiveness of memory
+017                  removal. We apply the audit to Continuous-Query Limited Memory Language
+018                  Models (Co-LMLM) and Natively Unlearnable Large Language Models (NULLs)
+019                  on five factual-recall benchmarks. Much of the post-deletion correctness in both
+020
+                     systems is also present when separable memory is disabled. This is expected for
+                     NULLs by design, but less so for Co-LMLM, which aims to keep facts out of its
+021
+                     weights. In NULLs, the backbone recites up to 81.1% of audited facts without
+022
+                     any source memory, and removing more sources does not remove more facts but
+023                  damages up to 13% of nearby ones. For Co-LMLM, up to 21.2% of all facts that
+024                  pass a naive accuracy test as unlearned are still recited by the backbone. A single
+025                  entry re-inserted into Co-LMLM’s memory restores 37.9–83.0% of facts the model
+026                  no longer answered after deletion. We propose the audit as a protocol that future
+027                  work on separable memory can use to support deletion claims.
+028
+029
+030
+      1      I NTRODUCTION
+031
+032
+033
+      There are two common reasons to delete a fact from a language model. A person may ask for their
+      data to be removed (Fosch-Villaronga et al., 2018), or the training data may contain information that
+034
+      should not have been included. In either case, the operator must both remove the relevant information
+035
+      and provide an auditable basis for the deletion claim (Thudi et al., 2022). This is difficult when
+036   knowledge is distributed across shared model parameters. A model may stop producing a fact even
+037   though information about it remains internally encoded (Lynch et al., 2024), while removing it from
+038   the parameters may require retraining or edits whose broader effects are difficult to control (Bourtoule
+039   et al., 2021; Meng et al., 2022; Mitchell et al., 2022a; Cohen et al., 2024). Models with separable
+040   memory offer a different approach by placing some knowledge in memory units that can be disabled
+041   directly.
+042   Two such systems, Co-LMLM (Feldman et al., 2026) and NULLs (Ghosal et al., 2026), serve as our
+043   case studies. Co-LMLM pairs a language-model backbone with an external memory of text entries.
+044   NULLs instead associates each training source with a sparse mask over a shared pool of sink neurons,
+045   while information common to many sources can remain in the backbone. In both systems, deletion
+046   acts on explicit memory units: external entries in Co-LMLM and source-specific memory in NULLs.
+047   The central question is whether disabling the units associated with a requested fact is enough to
+048   remove that fact from the system.
+049   A standard way to evaluate deletion is to compare the model’s output before and after the intervention
+050   (Maini et al., 2024; Shi et al., 2025; Li et al., 2024), including in systems with separable memory
+051   (Zhao et al., 2026; Feldman et al., 2026; Ghosal et al., 2026). This comparison does not explain why a
+052   fact is still recited after deletion. It may be supported by memory units that were not removed, or the
+053   backbone may recite it without separable memory at all. The reverse can also happen: the backbone
+      may recite a fact when memory is disabled, while the memory that remains after deletion causes
+
+
+                                                                                           1
+      Reviewers: please read the Reviewer Guidelines (iclr.cc/Conferences/2027/ReviewerGuidelines) and the AI Policy for Reviewers (iclr.cc/Conferences/2027/AIPolicyForReviewers).
+      If you used AI to expand, edit, or polish your review, please provide the input text to the LLM. Better still, consider skipping the LLM and submitting your original text: we,
+      and the authors, are much more interested in your unedited thoughts than in what an LLM has to say. AI-assisted or not, you are putting your name and reputation behind
+      your review: LLM-generated falsehoods, hallucinations or misrepresentations are subject to disciplinary action, which may include desk-rejecting all papers you have authored.
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+054
+      the model to produce a different answer. A before-and-after comparison counts this as successful
+055   deletion even though the backbone still recites the fact.
+056
+057   We introduce an audit that separates these cases. For each fact, we evaluate the same prompt with
+058
+      the full memory available, with the deletion set disabled while the remaining memory stays active,
+      and with separable memory disabled entirely. Comparing the latter two conditions tells us whether
+059
+      post-deletion recitation depends on memory that survived the deletion or on the backbone, and also
+060
+      reveals cases where surviving memory suppresses an answer the backbone would otherwise produce.
+061   We then vary the deletion rule and its breadth to test how reliably different rules identify the memory
+062   supporting a fact and what collateral damage broader deletion causes. We apply the same audit to both
+063   systems, and add system-specific tests that examine the mechanisms exposed by each architecture.
+064
+      The audit is intended as a protocol that papers on separable memory can use to support deletion
+065
+      claims, and Section 5 lists what such papers should report.
+066
+067
+068   2     R ELATED W ORK
+069
+070   Separable memory. Memory-based model editors store each edit outside the pretrained weights, and
+071   the memory component holding a given fact is therefore known (Mitchell et al., 2022b; Hartvigsen
+072
+      et al., 2023; Wang et al., 2024). Limited Memory Language Models instead build their memory from
+      a corpus, where the same fact can appear in many entries (Zhao et al., 2026; Feldman et al., 2026).
+073
+      NULLs builds on memorization sinks (Ghosal et al., 2025) and is evaluated on facts taken from the
+074
+      removed source itself (Ghosal et al., 2026), while we start from the fact to be deleted.
+075
+076   When retrieval hurts. Retrieved text can contradict what the model has learned in its weights
+077   (Longpre et al., 2021; Xie et al., 2024), and irrelevant text can make a model worse than it would be
+078
+      without retrieval. Mallen et al. (2023) use a fixed retrieval corpus, whereas in our setting, deletion itself
+      can lead the model to retrieve misleading text, which we measure as surviving-memory interference.
+079
+080   Probing and attacks. Linear probes test what can be decoded from a representation (Alain & Bengio,
+081   2017; Hewitt & Liang, 2019), while adversarial passages can hijack retrieval (Zhong et al., 2023)
+082   and, in RAG systems, induce attacker-chosen answers (Zou et al., 2025). We use both to test whether
+083   a deleted answer remains internally encoded and whether one inserted entry can undo a deletion.
+084   Auditing deletion. Raeesi & Roed (2026) audit deletion by comparing three memory conditions.
+085   There, each memory entry is a subject–relation–object triple, and the canonical and alias-equivalent
+086   entries for a fact can be enumerated and deleted. We adopt this three-condition design for Co-LMLM
+087   and NULLs, whose memory units are free-text entries and training sources rather than triples. We
+088   also add surviving-memory interference, deletion rules, and probing and re-insertion tests.
+089
+090   3     M ETHOD
+091
+092   3.1   AUDITING A DELETION
+093
+094   Models with separable memory. We consider language models with separable memory, in which
+095   part of the model’s knowledge resides in components that can be disabled without retraining the rest
+096
+      of the model. Formally, such a system consists of shared parameters θ (the backbone) and a memory
+      M = {m1 , . . . , mN }. We call each m ∈ M a memory unit. For M′ ⊆ M, we write pθ (· | x; M′ )
+097
+      for the model’s distribution over continuations of a prompt x when only the units in M′ are available,
+098
+      and ŷθ (x; M′ ) for the generated continuation.
+099
+100
+      Facts and recitation. A fact f is given by a prompt xf and a gold answer af . We say that the
+101   system recites f under memory M′ if the continuation it generates for xf matches the gold answer:
+102
+                             rec(f ; M′ ) = 1 match ŷθ (xf ; M′ ), af ∈ {0, 1},
+                                             [︁    (︁                 )︁]︁
+103                                                                                                 (1)
+104   where match is the answer-matching rule given in Section 4.1. We use recitation to assess whether
+105   the system possesses the knowledge of a given fact.
+106
+107   Deletion rules and deletion sets. In this audit, a deletion request concerns a fact rather than a
+      particular memory unit. The same fact may be supported by several units, and the backbone may
+
+
+                                                           2
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+108
+             Deletion request
+109
+                                                                                                              Separable memory M
+110                                                                                                              Co-LMLM · an entry in an external text store
+111          Requested fact f                                                                      ∈ R(f)
+                                                                                                                 NULLs · the source-specific sink memory of a
+                                                                                                                 training source
+112          The Membranes are a post-punk band           →                →                       ∈ R(f)
+                                                                                                              A deletion rule maps the fact to a deletion set R(f) ⊆
+             formed in Blackpool                                                backbone θ
+113                                                                                                           M. The same fact may be supported by several units,
+                                                                                                              and the backbone may recite it without any memory at
+114                                                                                                           all.
+
+115
+116          Same prompt, three memory conditions
+117                                       FULL memory M                               DEL-ON memory M ∖ R(f)                   DEL-OFF memory ∅
+
+118          Prompt xf
+
+119          The Membranes are a                                  “Blackpool”                                   “?”                                        “?”
+             post-punk band formed in                                  ✓                                       ✓ or ✗                                     ✓ or ✗
+120
+                                                  recFULL(f) = rec(f; M)                recDEL-ON(f) = rec(f; M ∖ R(f))               recDEL-OFF(f) = rec(f; ∅)
+121
+122
+123   Figure 1: A deletion request and the three memory conditions. Top: A deletion rule maps a requested
+124   fact f to a deletion set R(f ) ⊆ M of memory units. Bottom: The same prompt xf is run with the
+125   memory unchanged (FULL, memory M), with only the units in R(f ) disabled (DEL-ON, memory
+126   M \ R(f )), and with the separable memory disabled entirely (DEL-OFF, memory ∅).
+127
+128
+129
+      also be able to answer it without any memory at all. A deletion rule R therefore has to decide which
+      memory units to disable for a requested fact. We write
+130
+131                                                                        R(f ) ⊆ M
+132
+133   for the resulting set of units, henceforth referred to as the deletion set. Different deletion rules can
+134   produce different deletion sets for the same fact, so whether a deletion succeeds can depend on both
+135
+      the memory architecture and the rule used to identify what should be removed.
+136
+137   Three memory conditions. To assess the effectiveness of a given deletion set, we evaluate the same
+138
+      prompt under three memory conditions (Figure 1): FULL leaves the memory unchanged; DEL-ON
+      disables the units in R(f ) and leaves the rest of the memory intact; and DEL-OFF disables the
+139
+      separable memory entirely, leaving only the backbone. Formally:
+140
+141                   recFULL (f ) = rec(f ; M),                                                       memory unchanged,                                               (2a)
+142                                     (︁            )︁
+                    recDEL-ON (f ) = rec f ; M \ R(f ) ,                                               deletion set disabled,                                          (2b)
+143
+144
+                   recDEL-OFF (f ) = rec(f ; ∅),                                                       separable memory disabled.                                      (2c)
+145   Only recDEL-ON depends on the deletion rule. recDEL-OFF is a property of the backbone alone. A
+146   deletion is only meaningful for a fact that the system recites to begin with, so we audit facts with
+147   recFULL (f ) = 1. We denote the set of audited facts by F.
+148
+149   Separable facts. We say that the system retains f if it recites f with its memory intact,
+150   recFULL (f ) = 1. A retained fact is separable if the backbone does not recite it:
+151
+152
+                                         recFULL (f ) = 1                   and        recDEL-OFF (f ) = 0.
+153   A retained fact with recDEL-OFF (f ) = 1 is non-separable: the backbone itself recites f , and no
+154   memory operation can remove it. Separability is a property of the system (θ, M) and the prompt xf ,
+155   not of the deletion rule.
+156
+157   Audit outcomes. The comparison between DEL-ON and DEL-OFF is the central part of the audit.
+158   If the system recites f under both conditions, the fact is not separable. If it recites f under DEL-ON
+159   but not under DEL-OFF, the fact is separable, but it is retained through units outside R(f ), which
+160   means the deletion set is incomplete. The reverse case is also important. If the system recites f under
+161   DEL-OFF but not under DEL-ON, the backbone can recite the fact, and the surviving memory
+      M \ R(f ) suppresses an answer the backbone would otherwise produce.
+
+
+                                                                                  3
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+162
+      We summarize these outcomes with four per-fact quantities:
+163
+164         PDR(f ) = recDEL-ON (f ),                               post-deletion recitation,              (3a)
+165         BBR(f ) = recDEL-OFF (f ),                              backbone recitation,                   (3b)
+166
+                                     (︁                 )︁
+            SMS(f ) = recDEL-ON (f ) 1 − recDEL-OFF (f ) ,          surviving-memory support,              (3c)
+167                   (︁                 )︁
+168
+             SMI(f ) = 1 − recDEL-ON (f ) recDEL-OFF (f ),          surviving-memory interference.         (3d)
+169
+           ∑︁ to a set of facts, each quantity denotes its mean over that set, for example PDR(F) =
+      Applied
+       1
+             f ∈F PDR(f ). We drop the argument when the set is the audited cohort F, so that PDR, BBR,
+170
+      |F |
+171   SMS, and SMI without an argument denote rates.
+172
+173
+      Post-deletion recitation (PDR) is what a standard before-and-after evaluation observes. The other
+      quantities explain why that outcome occurred. Surviving-memory support (SMS) identifies facts that
+174
+      are recited only because of memory the deletion left behind, while surviving-memory interference
+175
+      (SMI) identifies facts that appear deleted only because the remaining memory causes an error. A
+176   before-and-after test counts every fact with SMI(f ) = 1 as successfully deleted, even though the
+177   backbone still recites it. To make this failure directly interpretable, we also report the spurious-
+178   deletion rate:
+179                                                       SMI
+                                                  Φ=               .                                     (4)
+180                                                     1 − PDR
+181   Since every audited fact is recited under FULL, 1−PDR is the fraction of facts that a before-and-after
+182   test counts as deleted, and Φ is the fraction of these that the backbone still recites.
+183
+184   Varying deletion breadth. Many deletion rules possess a breadth parameter b that controls how
+185   many units are disabled by them. Disabling more units might make the target harder to recite, but it
+186
+      might also affect other facts, so we measure both effects. Let N (f ) be a set of nearby control facts,
+      with f ∈ / N (f ). Let Rb (f ) be the deletion set that the rule produces for f at breadth b. Each control
+187
+      fact is evaluated under the deletion constructed for the target f , that is, with memory M \ Rb (f ):
+188
+                                 (︁                  )︁
+189         E(f, b) = 1 − rec f ; M \ Rb (f ) ,                                     target removal,         (5a)
+190                     ∑︁                         ′
+                                                      (︁          ′
+                                                                             )︁
+                           f ′ ∈N (f ) recFULL (f ) 1 − rec(f ; M \ Rb (f ))
+191         X(f, b) =                     ∑︁                       ′
+                                                                                ,   collateral damage.      (5b)
+192                                         f ′ ∈N (f ) recFULL (f )
+193   Here, E(f, b) = 1 when the target is no longer recited, and the collateral X(f, b) is the fraction of
+194   control facts that were recited before the deletion and are no longer recited afterward.
+195
+196   3.2   A PPLYING THE AUDIT TO C O -LMLM AND NULL S
+197
+198   We apply the same audit to two systems with different forms of separable memory: Co-LMLM (Feld-
+199   man et al., 2026) and NULLs (Ghosal et al., 2026). The systems differ in what a memory unit is, in
+200   how the model reads from an enabled memory M′ , and in the rules used to construct R(f ).
+201   Co-LMLM. In Co-LMLM, the backbone is a language model with parameters θ, and the separable
+202   memory is an external key–value store whose entries are the memory units: M = {(ki , vi )}N  i=1 .
+203   Each key ki is an L2 -normalized hidden state emitted at a <FACT> token, and each value vi is the
+204   associated text span. When the model emits <FACT>, its L2 -normalized hidden state q queries the
+205   enabled memory M′ by cosine similarity,
+206
+                                            (k ⋆ , v ⋆ ) = arg max ⟨q, k⟩.
+207                                                     (k,v)∈M′
+208
+      If ⟨q, k ⋆ ⟩ > τ for the retrieval threshold τ , the text v ⋆ is inserted into the generation context;
+209
+      otherwise, and always when M′ = ∅, generation continues without retrieval.
+210
+211   The three conditions of Equation 2 amount to retrieving from the full store (FULL), filtering the
+212   entries in R(f ) while retrieving from the rest (DEL-ON), and disabling retrieval (DEL-OFF). The
+213   difficulty is deciding which entries belong in R(f ). Let q̂f be the query formed for xf under FULL,
+214
+      and let m⋆f ∈ M be the entry it retrieves. We introduce several rules. Every rule disables m⋆f , which
+215
+      serves as an oracle seed, together with a set of related entries: the geometric rule Rgeo
+                                                                                             ρ adds entries
+      whose keys have cosine similarity at least ρ with q̂f ; the value rule Rval adds entries whose text
+
+
+                                                          4
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+216
+      mentions af ; the provenance rule Rprov adds entries from the same source document as m⋆f ; and
+217
+      the <FACT-q> rule RFACT-q generates alternative questions about the same fact and adds the entries
+218
+      retrieved by those questions. Appendix D.1 gives the formal definitions.
+219
+220   Unless stated otherwise, the standard Co-LMLM deletion is the union of the geometric and value
+221   rules, Rgeo
+              0.85 ∪ R
+                       val
+                           . We choose ρ = 0.85 as a middle ground within the range we later sweep.
+222   NULLs. NULLs stores its separable memory as trainable parameters. Each training source s is
+223   assigned a sparse mask µs over a shared pool of sink neurons. Activating µs determines which of
+224   these neurons participate in the forward pass, while knowledge shared across many sources can
+225   remain in the backbone. The memory units are the sources, M = S, and disabling a source removes
+226   its mask from those the model can use.
+227   A deletion request names a fact, not a source. We therefore associate each fact with the source whose
+228   Wikipedia article title matches the subject of the fact. When matching, we ignore underscores versus
+229   spaces, extra whitespace, and the case of the first character. We only audit facts that have a matching
+230   title. FULL uses the mask of this source. NULLs activates one source mask per forward pass (Ghosal
+231   et al., 2026). Under DEL-ON, we activate the mask of the source whose title embedding is closest to
+232   that of the deleted source. Under DEL-OFF, all sink neurons are disabled, leaving only the shared
+233   backbone. Since NULLs is never trained with all sinks disabled, Appendix C also tests a DEL-OFF
+234
+      that instead activates the mask of an unrelated source.
+235   The standard NULLs deletion rule is the provenance rule Rprov , which deletes only the source
+236   associated with the fact. We also test broader source-level rules: the geometric rule Rgeo
+                                                                                               k adds the k
+237   nearest source articles under an external text encoder, the value rule Rval adds nearby sources whose
+238   article text mentions the answer, and their combination Rgeo k ∩R
+                                                                            val
+                                                                                adds sources that satisfy both
+239   criteria. Larger k removes more sources and thus broadens deletion. Nearby source representations
+240   also define the control facts used to measure collateral damage. The formal definitions are in
+241   Appendix D.2.
+242   We only audit facts where the memory to be deleted supports the fact, since deleting memory that
+243   does not support it cannot test whether deletion works. For Co-LMLM, the entry retrieved under
+244   FULL must mention the gold answer af . For NULLs, the mask of the associated source must make
+245   af more likely than the mask of an unrelated source. This may exclude facts the backbone has fully
+246   memorized, which would make deletion look more effective than it is. Our estimates of backbone
+247   recitation for NULLs are therefore conservative.
+248   Co-LMLM and NULLs differ in model size, training data, objective, and memory implementation.
+249   We therefore treat them as two applications of the same audit rather than as a controlled comparison
+250   between architectures.
+251
+252   System-specific tests. Some questions require interfaces that only one of the systems exposes. For
+253   Co-LMLM, we use the contents of the retrieval store to ask whether answers that occur more densely
+254   near a query are also more likely to be recited by the backbone. We use a linear probe to ask whether
+255   answer information can be decoded from the model’s query representation even when the backbone
+256   does not recite that answer under DEL-OFF. Finally, we test whether placing a single answer-bearing
+257   entry just outside a geometric deletion boundary can reverse a deletion. Appendix E gives the full
+258
+      definitions. For NULLs, we ask more directly how much the source-specific sink contributes to the
+      fact. We compare the answer likelihood under the associated source mask and an unrelated source
+259
+      mask, measure how often turning the associated source on or off changes the generated answer,
+260
+      and replace the next-closest surviving source with an unrelated source to test whether post-deletion
+261   behavior depends on which source remains active. Appendix F gives the full definitions.
+262
+263
+264   4     R ESULTS AND D ISCUSSION
+265
+266   4.1   E XPERIMENTAL SETUP
+267
+268   Datasets. We evaluate on five factual-recall datasets: T-REx (Elsahar et al., 2018), PopQA (Mallen
+269   et al., 2023), Google-RE (Petroni et al., 2019), CounterFact (Meng et al., 2022), and ZsRE (Levy
+      et al., 2017). Each example specifies a fact, its gold answer, and a set of accepted aliases. T-REx,
+
+
+                                                         5
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+270
+271   Table 1: Rates of Equation 3 and 4 under each system’s standard deletion rule, in percent of the
+272   audited cohort F, n = |F |; ↓ marks rates where lower means more complete deletion. Reference
+273   models have no separable memory; their rows give accuracy on the same facts.
+274                                                           T-REx   Google-RE   CounterFact
+275                 Co-LMLM
+276                 n                                         7,407         608         3,479
+277                 Post-deletion recitation PDR ↓              8.3         0.3           5.9
+278                 Backbone recitation BBR ↓                  25.6         0.2          24.2
+                    Surviving-memory support SMS ↓              1.5         0.2           1.6
+279
+                    Surviving-memory interference SMI ↓        18.8         0.0          19.9
+280                 Spurious-deletion rate Φ ↓                 20.5         0.0          21.2
+281                 SmolLM2-360M                               41.3         5.8          43.6
+282                 Std-LM-360M                                46.8         3.0          46.1
+283                 NULLs
+284                 n                                         2,669          35            791
+285                 Post-deletion recitation PDR ↓             80.7        54.3           67.1
+                    Backbone recitation BBR ↓                  81.1        62.9           61.6
+286
+                    Surviving-memory support SMS ↓              8.1         8.6           17.3
+287                 Surviving-memory interference SMI ↓         8.4        17.1           11.8
+288                 Spurious-deletion rate Φ ↓                 43.7        37.5           35.8
+289                 SmolLM2-1.7B                               82.2        40.0           64.7
+290
+291
+292   Google-RE, and CounterFact are evaluated with cloze-style prompts, while PopQA and ZsRE use
+293   short-answer questions. Appendix B describes how we construct each prompt set and gives examples.
+294
+295   Answer matching. For generated outputs, we count an answer as correct when the model pro-
+296   duces the gold answer or one of its aliases as a complete phrase after casefolding and normalizing
+297   punctuation and whitespace. For Co-LMLM memory entries, we use a slightly more permissive
+298   rule because an entry may contain a shorter surface form of the same answer. We define an entry
+299   as answer-relevant if it contains the gold answer af or an accepted alias, or if the entry itself is a
+300   sufficiently long phrase within an alias, such as “Oxford” in “University of Oxford”. This rule is used
+301   in the Co-LMLM pre-deletion check (Section 3.2) and the value rule (Appendix D.1).
+302
+303   Selecting facts for evaluation. The deletion audit is meaningful only when the separable memory
+304   being tested is relevant to the fact before deletion. We therefore apply a system-specific pre-deletion
+305   check. The audited cohort F consists of the facts that pass the pre-deletion check (Section 3.2) and
+306   are recited under FULL. We report FULL accuracy over all facts that pass the check. Because the
+307   two systems use different checks, each has its own evaluation set.
+308
+309   Reference models and decoding. To put backbone recitation in context, we also evaluate con-
+310   ventional language models without separable memory. For Co-LMLM, we use its matched 360M
+311   standard-LM baseline and SmolLM2-360M. For NULLs, we use SmolLM2-1.7B. These models do
+312   not undergo deletion; their accuracy simply shows how often the same facts are answered without
+313
+      a separable memory mechanism. All models use greedy decoding with at most 12 new tokens.
+      Appendix H gives the checkpoints and remaining evaluation settings.
+314
+315
+316   4.2   W HAT SUPPORTS AN ANSWER AFTER DELETION ?
+317
+318   Our first experiment asks why a fact is still recited after deletion. For each system, we apply its
+319   standard deletion rule and compare DEL-ON with DEL-OFF. If a fact is recited only under DEL-
+320
+      ON, it depends on memory that survived (SMS). If it is also recited under DEL-OFF, the backbone
+      recites it without that memory. Table 1 reports these outcomes.
+321
+322   On T-REx, Co-LMLM recites 8.3% of facts under DEL-ON (PDR), but only 1.5% are recited
+323   because of surviving memory (SMS). For NULLs, the corresponding rates are 80.7% and 8.1%.
+      The same pattern appears on CounterFact. Therefore, most of the facts recited after deletion are
+
+
+                                                          6
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+324
+      answerable by the backbone alone. Deleting more memory cannot remove them; whether they can be
+325   deleted depends on how well training keeps them out of the backbone.
+326
+327   Deletion can also produce the opposite effect. Some facts are no longer recited under DEL-ON
+328
+      even though the backbone recites them under DEL-OFF. This surviving-memory interference
+      (SMI) affects 18.8% of Co-LMLM facts on T-REx and 19.9% on CounterFact. NULLs also shows
+329
+      interference, at 8.4% on T-REx and 11.8% on CounterFact. The later system-specific analyses of
+330
+      NULLs suggest that many of these cases involve facts supported mainly by the shared backbone, while
+331   changing the active source mask can still perturb the generated answer. In Co-LMLM, interference
+332   can instead arise when the remaining external memory retrieves text that overrides an answer the
+333   backbone recites without retrieval.
+334
+      For Co-LMLM, the spurious-deletion rate Φ is 20.5% on T-REx and 21.2% on CounterFact. For
+335
+      NULLs, Φ is 43.7% on T-REx and 35.8% on CounterFact. These rates show how often a before-
+336
+      and-after comparison can give a misleading picture of what deletion changed. For Co-LMLM, the
+337   backbone still recites the fact, but retrieval after deletion hides it. For NULLs, this mostly reflects
+338   deletion changing recitation about equally often in both directions (SMS ≈ SMI), not facts hidden
+339   by the remaining memory (see Appendix F).
+340
+      The backbone recitation BBR is below the accuracy of both 360M reference models on every prompt
+341
+      set for Co-LMLM. Externalizing factual text therefore reduces how often the backbone recites these
+342
+      facts, but does not eliminate it.
+343
+344   Google-RE is an exception for Co-LMLM, where post-deletion and backbone recitation are both near
+345   zero. The reference models, however, also answer only 3.0–5.8% of these facts, which suggests that
+346
+      the result reflects the difficulty of the prompt set more than the deletion. For NULLs, the Google-RE
+      cohort (n = 35) is too small to draw conclusions.
+347
+348   For space, Appendix G reports PopQA and ZsRE. In Co-LMLM, surviving-memory support stays
+349   below 1% on both. PopQA resembles T-REx and CounterFact, with interference far exceeding
+350   support, while ZsRE resembles Google-RE, with all rates near zero. In NULLs, post-deletion and
+351   backbone recitation remain close, though both cohorts are small (n = 22 and 79).
+352
+353
+      4.3   D OES THE DELETION RULE MATTER ?
+354
+355
+356
+      The previous experiment uses one standard deletion rule for each system. We next ask whether
+      the outcome changes when the same fact is mapped to different deletion sets. For Co-LMLM, we
+357
+      compare the oracle seed, geometric, provenance, <FACT-q>, and value rules described in Section 3.2,
+358
+      together with their unions. For NULLs, we compare the provenance, geometric, and value rules, and
+359   the intersection of the latter two. Table 12 reports T-REx, Google-RE, and CounterFact.
+360
+361   For Co-LMLM, the value rule is much more effective at removing supporting memory because it
+362
+      explicitly uses the answer text when constructing the deletion set. The geometric, provenance, and
+      <FACT-q> rules leave surviving-memory support (SMS) close to that of removing only the retrieved
+363
+      entry (30.0–36.3% on T-REx, 41.7–46.1% on CounterFact). However, every rule that includes the
+364
+      value rule reduces SMS to below 2%. The entries that support the answer therefore lie in other
+365   source documents and below the geometric threshold. In short, explicitly using the answer text when
+366   constructing the deletion set identifies supporting entries that the other rules miss.
+367
+368
+      This reduction comes at a cost. Surviving-memory interference rises from 6.7 to 18.8% on T-REx
+      and from 5.7 to 19.9% on CounterFact. A more complete deletion therefore makes more facts appear
+369
+      deleted, even though the backbone still recites them.
+370
+371   On Google-RE, the value rule likewise reduces surviving-memory support (SMS) from 14.1 to 0.2%,
+372   but without raising interference. The backbone recites almost none of these facts, meaning there is
+373   almost nothing for the remaining memory to hide.
+374   For NULLs, the choice of rule barely changes surviving-memory support (SMS). This is consistent
+375   with Appendix F, where SMS is unchanged when the next-closest source is replaced by an unre-
+376   lated one: support after deletion is not tied to any particular source, leaving broader rules little to
+377   remove. The value rule instead roughly halves surviving-memory interference (SMI) on T-REx and
+      CounterFact. The Google-RE cohort (n = 35) is too small to draw conclusions.
+
+
+                                                        7
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+378                                 T-REx          Google-RE      CounterFact        E (target removed)      X (collateral)
+379
+                                             Co-LMLM                                                      NULLs
+380              100
+381
+382                  80
+383
+384                  60
+            % of F
+385
+                     40
+386
+387
+                     20
+388
+389
+                      0
+                      0.95   0.90           0.85      0.80     0.75       0.70   1               2           4                8   16
+390
+                                cosine threshold ρ (broader → )                                sources removed k (broader → )
+391
+392
+      Figure 2: Effect of increasing deletion breadth. E is the fraction of target facts no longer recited after
+393
+      deletion, and X is the fraction of nearby facts recited under FULL that are no longer recited after
+394
+      applying the target’s deletion. Both are in percent, averaged over the targets in the audited cohort
+395   F. Intervals are Wilson 95% intervals (16). PopQA and ZsRE are reported in Figure 7. For NULLs,
+396   Google-RE had too few control facts for X to be plotted.
+397
+398
+399   For space, Appendix G reports the remaining datasets. On PopQA and ZsRE, only rules that include
+400   the value rule bring surviving-memory support in Co-LMLM to about 1%, at the cost of more
+401   interference on PopQA. In NULLs, the value rule lowers surviving-memory support, but the cohorts
+402   are too small to draw conclusions.
+403
+404
+405
+      4.4     W HAT HAPPENS WHEN DELETION IS MADE BROADER ?
+406
+      We now hold the geometric rule (Rgeo ) fixed and vary its breadth. This asks whether disabling more
+407
+      memory units makes the target fact less likely to be recited, and whether doing so also affects nearby
+408
+      facts. For Co-LMLM, lowering the cosine threshold ρ broadens geometric deletion. For NULLs,
+409   increasing k adds more neighboring sources to the deletion set. Since ρ and k control different
+410   operations, we examine the trend within each system rather than compare their values directly.
+411
+412
+      Although ρ and k are not comparable, the two systems respond to breadth in opposite ways. In
+      Co-LMLM, broader deletion removes more targets at little cost to nearby facts, whereas in NULLs it
+413
+      costs nearby facts without removing more targets. This reflects where the audited facts mainly reside,
+414
+      in separable memory for Co-LMLM and in the shared backbone for NULLs.
+415
+416
+417   4.5     ROBUSTNESS CHECKS
+418
+419   Surviving-memory support and interference both depend on how DEL-OFF is implemented, because
+420   DEL-OFF determines whether the backbone recites the fact. We therefore test a second implementa-
+421   tion of DEL-OFF for each system. For NULLs, we also vary the pre-deletion source check used to
+422
+      select facts for evaluation. Appendix C reports the full results.
+423   For Co-LMLM, the two implementations of DEL-OFF give nearly the same result. Backbone recita-
+424   tion differs by at most 1.0 percentage points across prompt sets, and surviving-memory interference
+425   differs by at most 0.3 points. The interference we observe therefore does not depend on the particular
+426   way retrieval is disabled.
+427   NULLs is more sensitive to the choice of DEL-OFF, especially on the smallest evaluation sets, so we
+428   treat its exact rates of surviving-memory support and interference more cautiously. We also tighten
+429   the pre-deletion verification requirement so that the associated source must support the gold answer
+430   by a larger margin. This removes many examples, but backbone recitation remains 69.7% on T-REx
+431   and 44.3% on CounterFact at the strictest tested margin. Even among facts most clearly supported by
+      their associated source, the backbone recites many of them without source-specific sink memory.
+
+
+                                                                          8
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+432
+      4.6   S YSTEM - SPECIFIC ANALYSES
+433
+434   The experiments above use the same basic audit for both systems. We finish with additional tests that
+435   use interfaces specific to each architecture.
+436
+      We first ask whether facts whose answers occur more densely near the query in the external store are
+437
+      also more likely to be recited by the backbone. Answer density is positively associated with backbone
+438
+      recitation, but less strongly for Co-LMLM than for the closed-book references. We next ask whether
+439   answer information can be decoded from Co-LMLM’s query representation even when the backbone
+440   does not recite the answer under DEL-OFF. A linear probe exceeds the strongest control by 5.6
+441   points on T-REx, 10.0 on CounterFact, and 4.4 on Google-RE; the evidence is weak on PopQA and
+442   absent on ZsRE. Finally, we test whether one surviving memory entry can reverse a deletion. A single
+443   verbatim answer-bearing entry placed just outside the geometric deletion boundary restores recitation
+444   for 37.9–83.0% of facts that were not recited after geometric deletion. Appendix E gives the full
+445   analyses. For NULLs, we ask how much the source-specific sink associated with a fact contributes
+446   to the model’s behavior. On four of the five prompt sets, the associated source mask makes the
+447
+      gold answer more likely than an unrelated source mask for only 50–52% of facts, and switching the
+      associated source mask on or off changes fewer than 5% of generated answers in each direction. We
+448
+      then replace the next-closest source used after deletion with an unrelated source. The resulting rates
+449
+      of surviving-memory support and interference change little on the larger evaluation sets. Together,
+450   these tests suggest that the evaluated facts are supported mainly by the shared backbone rather than by
+451   one particular source-specific sink, which is consistent with the intended design of NULLs (Ghosal
+452   et al., 2026). Appendix F gives the full analyses.
+453
+454
+455   5     C ONCLUSION
+456
+457   We introduced an audit that evaluates each fact with memory intact, with the deletion set disabled, and
+458   with separable memory disabled, and applied it to Co-LMLM and NULLs across five factual-recall
+459
+      benchmarks. In Co-LMLM, deletion appears more successful than it is. Up to 21.2% of facts that a
+      before-and-after comparison counts as deleted are still recited by the backbone, hidden only by the
+460
+      remaining memory, and a single similar entry added outside the deletion set restores up to 83.0% of
+461
+      deleted facts. In NULLs, the shared backbone recites up to 81.1% of audited facts without any source
+462   memory, consistent with its design for knowledge shared across sources. For such facts, deleting
+463   more sources does not remove more targets but damages up to 13% of nearby facts.
+464
+465
+      Our findings suggest what papers on separable memory should report to support a deletion claim.
+      First, they should define how a requested fact is mapped to memory units, since the choice of rule
+466
+      largely determines how much supporting memory survives. Second, they should evaluate each fact
+467
+      under all three memory conditions and report the spurious-deletion rate Φ, since a before-and-after
+468   comparison alone counts facts as deleted that the backbone still recites. Third, they should vary
+469   deletion breadth, since broader deletion can remove more targets or only harm nearby facts, depending
+470   on where facts reside. Finally, they should test how DEL-OFF is implemented, and, for external
+471   memory, whether a single added entry can undo a deletion.
+472
+      The results also point to one possible change for each system. Co-LMLM inserts the nearest entry
+473
+      above its retrieval threshold without checking whether it concerns the queried fact. This may be part
+474   of what allows the remaining memory to hide answers after deletion, and a single inserted entry to
+475   disrupt it. A learned check on retrieved entries could make what the backbone still recites visible
+476   rather than hidden. In NULLs, facts shared across articles appear to be held by the backbone because
+477   no single source sink holds them. Assigning each document an entity- or cluster-level sink alongside
+478   its article sink might give such facts a unit that source deletion can remove.
+479
+      Limitations. Recitation is measured with greedy decoding and answer matching, and backbone
+480   recitation is therefore a lower bound on what the backbone retains, as the representation probe
+481   indicates. We audit one model size per system and a fixed set of deletion rules, and other rules
+482   may remove supporting memory with less interference. For NULLs, we use standard factual-recall
+483   benchmarks rather than facts drawn from its training articles, which yields small audited cohorts
+484   on several of the benchmarks. A matched baseline for each system would allow comparing how
+485   much Co-LMLM and NULLs each reduce backbone recitation relative to a model without separable
+      memory.
+
+
+                                                        9
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+486
+      AI USE STATEMENT
+487
+488   In this work, we used generative AI tools to debug code and to improve the clarity of the writing. We
+489   have reviewed all AI-assisted work and take responsibility for the final content of this work.
+490
+491
+492
+      E THICS S TATEMENT
+493
+494   This work audits deletion in publicly released models, memory stores, and prompt sets, and involves
+495
+      no human subjects. The audited data contain facts about real people, but we construct no new records
+      about individuals, and our released outputs contain only benchmark prompts, model outputs, and
+496
+      memory entries already present in the public store.
+497
+498   The adversarial re-insertion test and the representation probe are dual-use. Both require privileged
+499   access, write access to the memory store or read access to internal representations, and both target the
+500   operator’s deletion procedure rather than any individual.
+501   Our results concern whether deletion removes a fact from model behavior and representations. They
+502   do not establish whether any system meets a legal standard for erasure.
+503
+504   R EPRODUCIBILITY STATEMENT
+505
+506   All audited models, memory stores, and prompt sets are publicly released. Appendix H lists the exact
+507   checkpoints, settings, and hyperparameters for every run. Appendix B describes how the prompt
+508   sets and audited cohorts are built. Appendices D, E, and F give the formal definitions of the deletion
+509   rules and all additional analyses. Appendix I describes the confidence intervals and statistical tests.
+510   Decoding is greedy with a fixed global seed. Appendix A reports the compute required.
+511
+512
+      R EFERENCES
+513
+514   Guillaume Alain and Yoshua Bengio. Understanding intermediate layers using linear classifier probes,
+515     2017. URL https://openreview.net/forum?id=ryF7rTqgl.
+516
+517   Lucas Bourtoule, Varun Chandrasekaran, Christopher A. Choquette-Choo, Hengrui Jia, Adelin
+518
+        Travers, Baiwu Zhang, David Lie, and Nicolas Papernot. Machine unlearning. In 2021 IEEE
+        Symposium on Security and Privacy (SP), pp. 141–159, 2021. doi: 10.1109/SP40001.2021.00019.
+519
+520
+      Roi Cohen, Eden Biran, Ori Yoran, Amir Globerson, and Mor Geva. Evaluating the ripple effects
+521     of knowledge editing in language models. Transactions of the Association for Computational
+522     Linguistics, 12:283–298, 2024. doi: 10.1162/tacl a 00644. URL https://aclanthology.
+523     org/2024.tacl-1.16/.
+524
+525   Hady Elsahar, Pavlos Vougiouklis, Arslen Remaci, Christophe Gravier, Jonathon Hare, Fred-
+526     erique Laforest, and Elena Simperl. T-REx: A large scale alignment of natural language with
+527     knowledge base triples. In Nicoletta Calzolari, Khalid Choukri, Christopher Cieri, Thierry De-
+528     clerck, Sara Goggi, Koiti Hasida, Hitoshi Isahara, Bente Maegaard, Joseph Mariani, Hélène
+529     Mazo, Asuncion Moreno, Jan Odijk, Stelios Piperidis, and Takenobu Tokunaga (eds.), Proceed-
+530
+        ings of the Eleventh International Conference on Language Resources and Evaluation (LREC
+        2018), Miyazaki, Japan, May 2018. European Language Resources Association (ELRA). URL
+531
+        https://aclanthology.org/L18-1544/.
+532
+533   Yair Feldman, Linxi Zhao, Nathan Godey, Dongyoung Go, Yilun Hua, Kilian Q. Weinberger,
+534     Jennifer J. Sun, and Yoav Artzi. Co-LMLM: Continuous-query limited memory language models.
+535     arXiv preprint arXiv:2607.07707, 2026. URL https://arxiv.org/abs/2607.07707.
+536
+537   Eduard Fosch-Villaronga, Peter Kieseberg, and Tiffany Li. Humans forget, machines remember:
+538     Artificial intelligence and the right to be forgotten. Computer Law & Security Review, 34(2):
+539     304–313, 2018. ISSN 2212-473X. doi: 10.1016/j.clsr.2017.08.007. URL https://www.
+        sciencedirect.com/science/article/pii/S0267364917302091.
+
+
+                                                        10
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+540
+      Gaurav Rohit Ghosal, Pratyush Maini, and Aditi Raghunathan. Memorization sinks: Isolating
+541     memorization during LLM training. In Aarti Singh, Maryam Fazel, Daniel Hsu, Simon Lacoste-
+542     Julien, Felix Berkenkamp, Tegan Maharaj, Kiri Wagstaff, and Jerry Zhu (eds.), Proceedings of
+543     the 42nd International Conference on Machine Learning, volume 267 of Proceedings of Machine
+544     Learning Research, pp. 19307–19326. PMLR, 13–19 Jul 2025. URL https://proceedings.
+545     mlr.press/v267/ghosal25a.html.
+546
+      Gaurav Rohit Ghosal, Pratyush Maini, and Aditi Raghunathan. Natively unlearnable large language
+547
+        models. arXiv preprint arXiv:2606.13873, 2026. URL https://arxiv.org/abs/2606.
+548
+        13873.
+549
+550   Tom Hartvigsen, Swami Sankaranarayanan, Hamid Palangi, Yoon Kim, and Marzyeh Ghassemi.
+551     Aging with GRACE: Lifelong model editing with discrete key-value adaptors. In A. Oh, T. Nau-
+552     mann, A. Globerson, K. Saenko, M. Hardt, and S. Levine (eds.), Advances in Neural Information
+553
+        Processing Systems, volume 36, pp. 47934–47959. Curran Associates, Inc., 2023. doi: 10.52202/
+        075280-2079. URL https://proceedings.neurips.cc/paper_files/paper/
+554
+        2023/file/95b6e2ff961580e03c0a662a63a71812-Paper-Conference.pdf.
+555
+556   John Hewitt and Percy Liang. Designing and interpreting probes with control tasks. In Kentaro
+557     Inui, Jing Jiang, Vincent Ng, and Xiaojun Wan (eds.), Proceedings of the 2019 Conference on
+558     Empirical Methods in Natural Language Processing and the 9th International Joint Conference on
+559     Natural Language Processing (EMNLP-IJCNLP), pp. 2733–2743, Hong Kong, China, November
+560     2019. Association for Computational Linguistics. doi: 10.18653/v1/D19-1275. URL https:
+561
+        //aclanthology.org/D19-1275/.
+562   Jeff Johnson, Matthijs Douze, and Hervé Jégou. Billion-scale similarity search with GPUs. IEEE
+563     Transactions on Big Data, 7(3):535–547, 2021. doi: 10.1109/TBDATA.2019.2921572.
+564
+565
+      Omer Levy, Minjoon Seo, Eunsol Choi, and Luke Zettlemoyer. Zero-shot relation extraction via
+       reading comprehension. In Roger Levy and Lucia Specia (eds.), Proceedings of the 21st Conference
+566
+       on Computational Natural Language Learning (CoNLL 2017), pp. 333–342, Vancouver, Canada,
+567
+       August 2017. Association for Computational Linguistics. doi: 10.18653/v1/K17-1034. URL
+568    https://aclanthology.org/K17-1034/.
+569
+570   Nathaniel Li, Alexander Pan, Anjali Gopal, Summer Yue, Daniel Berrios, Alice Gatti, Justin D. Li,
+571     Ann-Kathrin Dombrowski, Shashwat Goel, Gabriel Mukobi, Nathan Helm-Burger, Rassin Lababidi,
+572     Lennart Justen, Andrew Bo Liu, Michael Chen, Isabelle Barrass, Oliver Zhang, Xiaoyuan Zhu,
+573
+        Rishub Tamirisa, Bhrugu Bharathi, Ariel Herbert-Voss, Cort B Breuer, Andy Zou, Mantas Mazeika,
+        Zifan Wang, Palash Oswal, Weiran Lin, Adam Alfred Hunt, Justin Tienken-Harder, Kevin Y. Shih,
+574
+        Kemper Talley, John Guan, Ian Steneker, David Campbell, Brad Jokubaitis, Steven Basart, Stephen
+575
+        Fitz, Ponnurangam Kumaraguru, Kallol Krishna Karmakar, Uday Tupakula, Vijay Varadharajan,
+576    Yan Shoshitaishvili, Jimmy Ba, Kevin M. Esvelt, Alexandr Wang, and Dan Hendrycks. The WMDP
+577     benchmark: Measuring and reducing malicious use with unlearning. In Ruslan Salakhutdinov, Zico
+578     Kolter, Katherine Heller, Adrian Weller, Nuria Oliver, Jonathan Scarlett, and Felix Berkenkamp
+579     (eds.), Proceedings of the 41st International Conference on Machine Learning, volume 235 of
+580     Proceedings of Machine Learning Research, pp. 28525–28550. PMLR, 21–27 Jul 2024. URL
+581     https://proceedings.mlr.press/v235/li24bc.html.
+582
+      Shayne Longpre, Kartik Perisetla, Anthony Chen, Nikhil Ramesh, Chris DuBois, and Sameer Singh.
+583     Entity-based knowledge conflicts in question answering. In Marie-Francine Moens, Xuanjing
+584     Huang, Lucia Specia, and Scott Wen-tau Yih (eds.), Proceedings of the 2021 Conference on Empir-
+585     ical Methods in Natural Language Processing, pp. 7052–7063, Online and Punta Cana, Dominican
+586     Republic, November 2021. Association for Computational Linguistics. doi: 10.18653/v1/2021.
+587     emnlp-main.565. URL https://aclanthology.org/2021.emnlp-main.565/.
+588
+      Aengus Lynch, Phillip Guo, Aidan Ewart, Stephen Casper, and Dylan Hadfield-Menell. Eight
+589
+        methods to evaluate robust unlearning in LLMs. arXiv preprint arXiv:2402.16835, 2024. URL
+590
+        https://arxiv.org/abs/2402.16835.
+591
+592   Pratyush Maini, Zhili Feng, Avi Schwarzschild, Zachary Chase Lipton, and J Zico Kolter. TOFU: A
+593     task of fictitious unlearning for LLMs. In First Conference on Language Modeling, 2024. URL
+        https://openreview.net/forum?id=B41hNBoWLo.
+
+
+                                                     11
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+594
+      Alex Mallen, Akari Asai, Victor Zhong, Rajarshi Das, Daniel Khashabi, and Hannaneh Hajishirzi.
+595     When not to trust language models: Investigating effectiveness of parametric and non-parametric
+596     memories. In Anna Rogers, Jordan Boyd-Graber, and Naoaki Okazaki (eds.), Proceedings of the
+597     61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers),
+598     pp. 9802–9822, Toronto, Canada, July 2023. Association for Computational Linguistics. doi:
+599     10.18653/v1/2023.acl-long.546. URL https://aclanthology.org/2023.acl-long.
+600     546/.
+601
+      Quinn McNemar. Note on the sampling error of the difference between correlated proportions or
+602
+        percentages. Psychometrika, 12(2):153–157, 1947. doi: 10.1007/BF02295996.
+603
+604   Kevin Meng, David Bau, Alex Andonian, and Yonatan Belinkov.        Locating and edit-
+605     ing factual associations in GPT. In S. Koyejo, S. Mohamed, A. Agarwal, D. Bel-
+606     grave, K. Cho, and A. Oh (eds.), Advances in Neural Information Processing Sys-
+607     tems, volume 35, pp. 17359–17372. Curran Associates, Inc., 2022.    doi: 10.52202/
+608
+        068431-1262. URL https://proceedings.neurips.cc/paper_files/paper/
+        2022/file/6f1d43d5a82a37e89b0665b33bf3a182-Paper-Conference.pdf.
+609
+610   Eric Mitchell, Charles Lin, Antoine Bosselut, Chelsea Finn, and Christopher D Manning. Fast
+611     model editing at scale. In International Conference on Learning Representations, 2022a. URL
+612     https://openreview.net/forum?id=0DcZxeWfOPt.
+613
+      Eric Mitchell, Charles Lin, Antoine Bosselut, Christopher D Manning, and Chelsea Finn. Memory-
+614
+        based model editing at scale. In Kamalika Chaudhuri, Stefanie Jegelka, Le Song, Csaba Szepesvari,
+615
+        Gang Niu, and Sivan Sabato (eds.), Proceedings of the 39th International Conference on Machine
+616     Learning, volume 162 of Proceedings of Machine Learning Research, pp. 15817–15831. PMLR, 17–
+617     23 Jul 2022b. URL https://proceedings.mlr.press/v162/mitchell22a.html.
+618
+619   Fabio Petroni, Tim Rocktäschel, Sebastian Riedel, Patrick Lewis, Anton Bakhtin, Yuxiang Wu,
+620     and Alexander Miller. Language models as knowledge bases? In Kentaro Inui, Jing Jiang,
+621
+        Vincent Ng, and Xiaojun Wan (eds.), Proceedings of the 2019 Conference on Empirical Methods
+        in Natural Language Processing and the 9th International Joint Conference on Natural Language
+622
+        Processing (EMNLP-IJCNLP), pp. 2463–2473, Hong Kong, China, November 2019. Association
+623
+        for Computational Linguistics. doi: 10.18653/v1/D19-1250. URL https://aclanthology.
+624     org/D19-1250/.
+625
+626   Arya Raeesi and Hanna Roed. Auditing forgetting in limited memory language models. arXiv
+627     preprint arXiv:2607.00605, 2026. URL https://arxiv.org/abs/2607.00605.
+628
+      Weijia Shi, Jaechan Lee, Yangsibo Huang, Sadhika Malladi, Jieyu Zhao, Ari Holtzman, Daogao
+629    Liu, Luke Zettlemoyer, Noah A. Smith, and Chiyuan Zhang. MUSE: Machine unlearning six-
+630    way evaluation for language models. In The Thirteenth International Conference on Learning
+631    Representations, 2025. URL https://openreview.net/forum?id=TArmA033BU.
+632
+633   Anvith Thudi, Hengrui Jia, Ilia Shumailov, and Nicolas Papernot. On the necessity of auditable
+634
+        algorithmic definitions for machine unlearning. In 31st USENIX Security Symposium (USENIX
+        Security 22), pp. 4007–4022, Boston, MA, August 2022. USENIX Association. ISBN 978-1-
+635
+        939133-31-1. URL https://www.usenix.org/conference/usenixsecurity22/
+636
+        presentation/thudi.
+637
+638   Peng Wang, Zexi Li, Ningyu Zhang, Ziwen Xu, Yunzhi Yao, Yong Jiang, Pengjun Xie, Fei
+639     Huang, and Huajun Chen. WISE: Rethinking the knowledge memory for lifelong model
+640     editing of large language models. In A. Globerson, L. Mackey, D. Belgrave, A. Fan,
+641     U. Paquet, J. Tomczak, and C. Zhang (eds.), Advances in Neural Information Processing
+642
+        Systems, volume 37, pp. 53764–53797. Curran Associates, Inc., 2024. doi: 10.52202/
+        079017-1703. URL https://proceedings.neurips.cc/paper_files/paper/
+643
+        2024/file/60960ad78868fce5c165295fbd895060-Paper-Conference.pdf.
+644
+645   Edwin B. Wilson. Probable inference, the law of succession, and statistical inference. Journal
+646     of the American Statistical Association, 22(158):209–212, 1927. doi: 10.1080/01621459.1927.
+647     10502953. URL https://www.tandfonline.com/doi/abs/10.1080/01621459.
+        1927.10502953.
+
+
+                                                     12
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+648
+      Jian Xie, Kai Zhang, Jiangjie Chen, Renze Lou, and Yu Su. Adaptive chameleon or stubborn
+649      sloth: Revealing the behavior of large language models in knowledge conflicts. In The Twelfth
+650      International Conference on Learning Representations, 2024. URL https://openreview.
+651      net/forum?id=auKAUJZMO6.
+652
+653   Linxi Zhao, Sofian Zalouk, Christian Belardi, Justin Lovelace, Jin Peng Zhou, Ryan Thomas Noonan,
+654
+        Dongyoung Go, Kilian Q Weinberger, Yoav Artzi, and Jennifer J. Sun. Pre-training limited
+        memory language models with internal and external knowledge. In The Fourteenth International
+655
+        Conference on Learning Representations, 2026. URL https://openreview.net/forum?
+656
+        id=cvztBvlglK.
+657
+658   Zexuan Zhong, Ziqing Huang, Alexander Wettig, and Danqi Chen. Poisoning retrieval corpora by
+659     injecting adversarial passages. In Houda Bouamor, Juan Pino, and Kalika Bali (eds.), Proceedings
+660     of the 2023 Conference on Empirical Methods in Natural Language Processing, pp. 13764–13775,
+661     Singapore, December 2023. Association for Computational Linguistics. doi: 10.18653/v1/2023.
+662
+        emnlp-main.849. URL https://aclanthology.org/2023.emnlp-main.849/.
+663   Wei Zou, Runpeng Geng, Binghui Wang, and Jinyuan Jia. PoisonedRAG: Knowledge corruption
+664    attacks to Retrieval-Augmented generation of large language models. In 34th USENIX Secu-
+665    rity Symposium (USENIX Security 25), pp. 3827–3844, Seattle, WA, August 2025. USENIX
+666    Association. ISBN 978-1-939133-52-6. URL https://www.usenix.org/conference/
+667    usenixsecurity25/presentation/zou-poisonedrag.
+668
+669
+670
+671
+672
+673
+674
+675
+676
+677
+678
+679
+680
+681
+682
+683
+684
+685
+686
+687
+688
+689
+690
+691
+692
+693
+694
+695
+696
+697
+698
+699
+700
+701
+
+
+
+                                                     13
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+702
+      A     C OMPUTE AND R EPRODUCIBILITY
+703
+704
+705   Jobs. The full audit consists of 185 jobs: 95 for Co-LMLM, 75 for NULLs, and 5 for each of the
+706   three reference models. The jobs are created and distributed by a scheduler in our code.
+707
+      GPU hours. Co-LMLM took 110 GPU hours, and its two 360M reference models took 19 and 18
+708   GPU hours. The NULLs audit took 127 GPU hours and the SmolLM2-1.7B reference took 22 GPU
+709   hours. In total, the audit took 296 GPU hours.
+710
+711
+      Models and data. We use the released Co-LMLM memory store built from FineWeb-Edu and
+      Wikipedia (Feldman et al., 2026), indexed with FAISS (Johnson et al., 2021). It takes 1.07 TB of
+712
+      disk space. For NULLs, we use the released Wikipedia checkpoint, which takes 12.08 GB, and its
+713
+      released mapping from 6,407,814 article titles to source identifiers, which takes 179.3 MB.
+714
+715
+716
+717   B    DATASET AND C OHORT C ONSTRUCTION
+718
+719
+720   We build all five prompt sets with released preparation scripts. Each fact has one prompt, a canonical
+721
+      gold answer, and a set of aliases.
+722   T-REx. We use cloze prompts from the LAMA release (Petroni et al., 2019). Each prompt is the
+723   shortest prefix of the source sentence that contains the subject and is at least 30 characters long. The
+724   gold answer is the answer as it appears in that sentence, and the object label from the knowledge base
+725   is an alias.
+726   PopQA. We use questions from the test split, restricted to subjects with a Wikipedia popularity of at
+727   least 104 . The first listed answer is gold, and the rest are aliases.
+728
+      Google-RE. We use the born-in and died-in relations from LAMA as template cloze prompts,
+729
+      excluding birth dates and keeping at most 2,000 facts per relation.
+730
+731   CounterFact. We fill the rewrite prompt with the subject and score it against the true answer, not the
+732   counterfactual one.
+733   ZsRE. We use the evaluation release from MEND (Mitchell et al., 2022a). The first listed answer is
+734   gold, and the rest are aliases.
+735
+736
+737
+738   Table 2: Three example prompts per set, shown verbatim. For PopQA and ZsRE, the suffix “The answer is” is
+739   omitted. The gold column shows the canonical answer.
+740
+741        Dataset        Prompt                                                           Gold
+742                       The Membranes are a post-punk band formed in                     Blackpool
+743        T-REx          Agaléga (French: ı̂les Agaléga) are two Outer islands of       Mauritius
+                          Palacio Municipal de Deportes de Granada is an arena in          Granada
+744
+745                       What genre is Sonic Youth?                                       alternative rock
+746        PopQA          Who is the mother of Alexander the Great?                        Olympias
+                          What is the capital of Trinidad and Tobago?                      Port of Spain
+747
+748                       Jacob Henry Studer was born in                                   Columbus
+749
+           Google-RE      Georgina Willis was born in                                      Australia
+                          Stanley Corrsin was born in                                      Philadelphia
+750
+751                       Autonomous University of Madrid, which is located in             Spain
+           CounterFact    The mother tongue of Thomas Joannes Stieltjes is                 Dutch
+752
+                          Porsche 911, created by                                          Porsche
+753
+754
+                          Who was the designer of Lahti Town Hall?                         Eliel Saarinen
+           ZsRE           What architect designed Toodyay Fire Station?                    Ken Duncan
+755                       What is the name of Nebaioth father?                             Ishmael
+
+
+                                                           14
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+756
+      C     ROBUSTNESS C HECKS
+757
+758
+      C.1    A LTERNATIVE DEL-OFF IMPLEMENTATION
+759
+760   Surviving-memory support SMS and surviving-memory interference SMI are read off a comparison
+761   with DEL-OFF, and therefore both depend on how memory is disabled. Table 3 repeats the standard
+762   deletion rule under each system’s second implementation of DEL-OFF, with the cohort and the
+763   deletion rule unchanged. This tells us whether the decomposition describes the system or the particular
+764   way we disabled its memory.
+765   For Co-LMLM, the standard implementation, NULL - RETRIEVAL, lets the model emit <FACT>
+766   but filters every retrieval candidate, so generation continues without inserted text. The alternative,
+767   FORBID - TOKEN , prevents <FACT> from being emitted at all, so the model never attempts retrieval.
+768   For NULLs, the standard implementation, SINKS - ZERO, deactivates all sink neurons, while the
+769   alternative, PLACEBO - SINK, instead activates the mask of an unrelated source.
+770
+771   Table 3: Outcomes under two implementations of DEL-OFF, in percent of the audited cohort F, with Wilson
+      95% intervals (16). In Co-LMLM, NULL - RETRIEVAL filters every candidate and FORBID - TOKEN prevents
+772
+      <FACT> emission entirely. In NULLs, SINKS - ZERO deactivates the source-specific sink neurons and PLACEBO -
+773   SINK activates the mask of an unrelated source in their place. Each implementation label refers to the rate in the
+774   row above it and the interval in its own row.
+775
+776                  DEL-OFF                    T-REx      Google-RE      CounterFact        PopQA            ZsRE
+777         Co-LMLM
+778         n                                    7,407            608           3,479            761          2,260
+779                                               25.6            0.2            24.2            8.4            0.9
+            BBR      NULL - RETRIEVAL       [24.6, 26.6]     [0.0, 0.9]    [22.8, 25.7]    [6.6, 10.6]     [0.6, 1.4]
+780
+                                                  24.6             0.3           23.6             8.7            0.9
+781                  FORBID - TOKEN         [23.7, 25.6]     [0.1, 1.2]    [22.2, 25.0]    [6.9, 10.9]     [0.6, 1.4]
+782                                                 1.5            0.2             1.6            0.9            0.7
+783         SMS      NULL - RETRIEVAL         [1.2, 1.8]     [0.0, 0.9]      [1.2, 2.1]     [0.4, 1.9]     [0.4, 1.1]
+784                                                 2.5            0.2             2.2            0.9            0.7
+785                  FORBID - TOKEN           [2.2, 2.9]     [0.0, 0.9]      [1.8, 2.8]     [0.4, 1.9]     [0.4, 1.1]
+
+786                                               18.8             0.0           19.9             8.1            0.7
+            SMI      NULL - RETRIEVAL       [17.9, 19.7]     [0.0, 0.6]    [18.7, 21.3]    [6.4, 10.3]     [0.4, 1.1]
+787
+                                                  18.8             0.2           19.9             8.4            0.8
+788                  FORBID - TOKEN         [18.0, 19.8]     [0.0, 0.9]    [18.7, 21.3]    [6.6, 10.6]     [0.5, 1.2]
+789
+            NULLs
+790
+            n                                    2,669              35            791             22             79
+791                                               81.1            62.9           61.6           72.7           38.0
+792         BBR      SINKS - ZERO           [79.5, 82.5]   [46.3, 76.8]    [58.1, 64.9]   [51.8, 86.8]   [28.1, 49.0]
+793                                               79.8            57.1           67.6           36.4           38.0
+794                  PLACEBO - SINK         [78.3, 81.3]   [40.9, 72.0]    [64.3, 70.8]   [19.7, 57.0]   [28.1, 49.0]
+
+795                                                 8.1            8.6           17.3           13.6           22.8
+            SMS      SINKS - ZERO             [7.1, 9.1]    [3.0, 22.4]    [14.8, 20.1]    [4.7, 33.3]   [14.9, 33.2]
+796
+                                                    8.3           17.1           13.8           40.9           19.0
+797                  PLACEBO - SINK           [7.3, 9.4]    [8.1, 32.7]    [11.6, 16.4]   [23.3, 61.3]   [11.9, 29.0]
+798                                                 8.4           17.1           11.8           13.6           20.3
+799         SMI      SINKS - ZERO             [7.4, 9.5]    [8.1, 32.7]     [9.7, 14.2]    [4.7, 33.3]   [12.9, 30.4]
+800                                                 7.5           20.0           14.3             4.5          16.5
+801                  PLACEBO - SINK           [6.5, 8.5]   [10.0, 35.9]    [12.0, 16.9]    [0.8, 21.8]    [9.9, 26.1]
+
+802
+803
+804   For Co-LMLM, the choice of implementation barely moves the decomposition. The two estimates
+805   of backbone recitation BBR differ by at most 1.0 points, SMI by at most 0.3, and SMS stays small
+806
+      under both at no more than 2.5%. We read this as evidence that surviving-memory interference
+      SMI comes from what Co-LMLM retrieves after deletion, since it is almost identical under both
+807
+      implementations, while what movement there is sits mostly in BBR and SMS.
+808
+809   The picture is different for NULLs. The largest cohort, T-REx, remains stable, but BBR moves by
+      6.1 points on CounterFact. Additionally, the three small cohorts move much further. For instance,
+
+
+                                                             15
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+810
+      on PopQA (n = 22), SMS rises from 13.6 to 40.9% while SMI falls from 13.6 to 4.5%. Since
+811   the largest movements fall on the smallest cohorts, we cannot separate genuine sensitivity to the
+812   implementation from sampling noise. Therefore, we read the NULLs values of SMS and SMI as
+813   indicative rather than exact.
+814
+815   C.2       S TRICTER SOURCE VERIFICATION
+816
+817   Before auditing a fact in NULLs, we check that its associated source actually supports it. The
+818   associated-source mask, the sink mask assigned to that source article, must make the answer more
+819   likely than a placebo mask, the mask of a source deterministically chosen to be unrelated to it. We
+820   accept any positive difference, but that difference is usually small, with a median of 0.010 nats on
+821   T-REx (see Table 7). The cohort therefore contains many facts that their own source barely supports.
+822
+      Table 4 raises the required difference δ, keeping only facts whose source clearly supports them, and
+      recomputes the outcomes on what remains. The question is whether our results hold on the facts
+823
+      where deleting the source should matter most.
+824
+825
+      Table 4: NULLs outcomes under the standard deletion rule as the verification-gate margin δ is tightened, in
+826   percent of the audited cohort F, with Wilson 95% intervals. “Passing” is the number of facts that pass the gate
+827   and n = |F| the subset of those recited under FULL. The row marked ‡ is the threshold used for the results
+828   reported elsewhere in the paper.
+829
+830         δ        Passing        n               PDR                 BBR                  SMS                 SMI
+831         T-REx
+832         0.00‡ 10,711       2,669      80.7 [79.2, 82.2]   81.1 [79.5, 82.5]      8.1 [7.1, 9.1]      8.4 [7.4, 9.5]
+833         0.25   6,468       1,329      72.2 [69.8, 74.6]   74.3 [71.9, 76.6]     9.0 [7.6, 10.7]    11.1 [9.6, 12.9]
+834
+            0.50   3,749         672      66.7 [63.0, 70.1]   71.3 [67.7, 74.6]     8.5 [6.6, 10.8]   13.1 [10.8, 15.9]
+            1.00   1,309         221      61.5 [55.0, 67.7]   69.7 [63.3, 75.4]     8.6 [5.6, 13.0]   16.7 [12.4, 22.2]
+835
+836         CounterFact
+837
+            0.00‡   8,915          791    67.1 [63.8, 70.3]   61.6 [58.1, 64.9]   17.3 [14.8, 20.1]    11.8 [9.7, 14.2]
+            0.25    6,222          516    62.4 [58.1, 66.5]   57.0 [52.7, 61.2]   18.8 [15.7, 22.4]   13.4 [10.7, 16.6]
+838         0.50    4,011          326    56.7 [51.3, 62.0]   52.1 [46.7, 57.5]   18.7 [14.9, 23.3]   14.1 [10.7, 18.3]
+839         1.00    1,561          115    47.0 [38.1, 56.0]   44.3 [35.6, 53.5]   21.7 [15.2, 30.1]   19.1 [13.0, 27.3]
+840
+841
+842   At δ = 1.00, 1,309 of 10,711 facts remain on T-REx and 1,561 of 8,915 on CounterFact. Backbone
+843   recitation BBR drops by 11.4 and 17.2 percentage points respectively, to 69.7% and 44.3%. The
+844   backbone still recites most of these facts with source memory disabled entirely, even though they
+845   are the facts their own source supports most clearly. Surviving-memory interference SMI roughly
+846   doubles on T-REx and rises by about 60% on CounterFact. Our read on this is that the facts their
+847   source supports most clearly are also the facts where surviving memory most often overrides a correct
+848   answer, which is why SMI rises as the cohort shrinks.
+849
+850   D     D ELETION RULES
+851
+852   D.1       C O -LMLM
+853
+854   Let q̂f denote the query representation captured for fact f under FULL, and let m⋆f denote the entry
+855   it retrieves. We consider three basic deletion rules, each of which includes m⋆f as an oracle seed:
+856
+857                            Rgeo        ⋆
+                                ρ (f ) = {mf } ∪ {(k, v) ∈ M : ⟨q̂f , k⟩ ≥ ρ},
+858
+859
+                               Rval (f ) = {m⋆f } ∪ {(k, v) ∈ M : match(v, af )},                                         (6)
+                                prov
+860                            R       (f ) = {m⋆f } ∪ {(k, v) ∈ M : src(v) = src(m⋆f )}.
+861
+862   Here, ρ is a cosine-similarity threshold and src(v) is the source document of entry v. The geometric
+863   rule removes entries close to the query, the value rule removes entries that mention the answer, and
+      the provenance rule removes entries from the same source document as m⋆f .
+
+
+                                                              16
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+864
+      The <FACT-q> rule. A released question generator receives the answer-mentioning entry selected
+865   under FULL; the audit prompt itself is not shown. Each generated question is passed through
+866   Co-LMLM’s <FACT-q> interface, and entries retrieved above threshold τ are added to the deletion
+867   set. This reduces dependence on the particular audit prompt, although initialization still requires an
+868   answer-mentioning FULL entry with a locatable answer span.
+869
+870   D.2    NULL S
+871
+872   Let sf ∈ M denote the source associated with fact f . Let e(·) denote the external text encoder, and
+873   let Nk (f ) denote the k sources other than sf with the highest cosine similarity ⟨e(s), e(sf )⟩. We
+874
+      consider three basic deletion rules:
+875
+876                        Rprov (f ) = {sf },
+877                         Rgeo
+                             k (f ) = {sf } ∪ Nk (f ),                                                   (7)
+878
+                             Rval (f ) = {sf } ∪ {s ∈ NK (f ) : match(text(s), af )}.
+879
+880   The provenance rule removes only the associated source, the geometric rule adds the k nearest source
+881   articles, and the value rule adds, among the K = 500 nearest sources, those whose article text
+882   mentions the answer. Their intersection, Rgeo
+                                                k ∩R
+                                                       val
+                                                           , adds only the sources among the k nearest that
+883   mention the answer.
+884   Routing under DEL-ON. Disabling a deletion set R(f ) zeroes every sink neuron in the union of the
+885   masks µs , s ∈ R(f ). NULLs then activates the mask of the next-closest source in its routing list for
+886   sf that is not in R(f ). Neurons shared with a deleted mask stay zeroed, so the routed source cannot
+887   reactivate them.
+888
+889   E     C O -LMLM-S PECIFIC A NALYSES
+890
+891   This appendix defines the Co-LMLM-specific tests summarized in Section 4.6 and reports their full
+892   results. Throughout, q̂f is the query formed for xf under FULL, EK (f ) is the set of K memory
+893   entries nearest to q̂f , and match is the answer-matching rule from Section 4.1.
+894
+      The radius sweep and re-insertion test use the audited cohort F. The answer-density and probe
+895
+      analyses instead use every fact that passes the pre-deletion check, including facts that Co-LMLM
+896   does not recite under FULL. These sets contain 8,258 facts on T-REx, 1,001 on PopQA, 633 on
+897   Google-RE, 4,085 on CounterFact, and 3,754 on ZsRE. Backbone recitation in Figures 3 and 4 is
+898   therefore computed over a larger set and differs slightly from BBR in Table 1; on T-REx, for example,
+899   the rates are 25.0% and 25.6%.
+900
+901   E.1   A NSWER DENSITY
+902
+903   We measure how densely an answer appears around a query in the memory store:
+                                          ⃓                                  ⃓
+904                            dens(f ) = ⃓{(k, v) ∈ EK (f ) : match(v, af )}⃓.                      (8)
+905   We use K = 500, so the measure is right-censored at 500. Larger values mean that more entries near
+906   the query mention the answer.
+907
+      Figure 3 asks whether facts whose answers appear more often near the query are also more likely to be
+908
+      recited by the backbone. The association is positive on every prompt set, but weaker for Co-LMLM
+909
+      than for the reference models, with Spearman correlations of 0.05–0.27 against 0.21–0.63. The gap
+910   remains in the densest quartile: on T-REx, the Co-LMLM backbone recites 43.8% of these facts,
+911   compared with 72.0% for SmolLM2-360M and 80.2% for Std-LM-360M. Frequent mention of an
+912   answer in the external memory therefore does not imply that the backbone recites it.
+913
+914   E.2   R EPRESENTATION PROBE
+915
+916   Backbone recitation records whether Co-LMLM generates the answer without retrieval, but not
+917   whether information about the answer is absent from its internal representations. We therefore test
+      whether the answer can be decoded from q̂f , taken from the first retrieval event of the FULL trace.
+
+
+                                                       17
+      Under review as a conference paper at ICLR 2027
+
+
+
+
+918                                     Co-LMLM (BBR)                SmolLM2-360M              Std-LM-360M
+919
+                                             T-REx                     PopQA                      Google-RE                     CounterFact                   ZsRE
+920
+                                  +0.27                        +0.12                         +0.05                       +0.22                       +0.07
+921                          75
+
+      backbone recitation
+                                  +0.41                        +0.63                         +0.31                       +0.44                       +0.37
+922                               +0.45                        +0.53                         +0.21                       +0.44                       +0.27
+                             50
+923
+
+          BBR (%)
+924                          25
+925
+926                           0
+                                  Q1         Q2   Q3   Q4     Q1       Q2    Q3    Q4        Q1       Q2      Q3   Q4    Q1      Q2     Q3    Q4     Q1      Q2    Q3         Q4
+927                                                                             answer-density quartile (sparse → dense)
+928
+929
+930   Figure 3: Backbone recitation BBR by answer-density quartile, from Q1 (sparsest) to Q4 (densest),
+931   with dataset-specific quartile edges. Density counts answer-mentioning entries among the 500 entries
+932   nearest the query. The reference models have no separable memory, so their curves give accuracy on
+933   the same facts. Numbers in each panel are Spearman rank correlations between density and recitation.
+934
+                                          backbone recitation BBR           probe BBR rep (query representation)              prompt-only controls
+935
+                                                                                                       25.0                      35.1
+936
+                            T-REx
+937                                                     8.1                          19.2
+938                         PopQA
+                                   0.2                        10.4
+939
+          Google-RE
+940                                                                                            22.6                                                               48.0
+941    CounterFact
+                                       0.7             7.4
+942
+                             ZsRE
+943
+                                    0                         10                        20                          30                        40                         50
+944
+                                                                                            gold answer recovered (%)
+945
+946
+947
+      Figure 4: Linear-probe recitation BBRrep from Co-LMLM query representations, compared with
+948   backbone recitation BBR over all facts that pass the pre-deletion check. The controls use only the
+949   prompt or the answer distribution and do not see the query representation.
+950
+951
+952   We fit a linear readout W with ridge regression under five-fold cross-validation. Each held-out
+953   representation is scored against a closed candidate set Y containing the deduplicated gold answers of
+954   the probed facts, with candidates represented by hashed character-trigram features ψ(·). We count
+955
+      the probe as correct on f if its top-ranked candidate matches the gold answer:
+956
+                                              [︃      (︃                         )︃]︃
+957                          BBRrep (f ) = 1 match arg max ψ(y)⊤ W q̂f , af           .                 (9)
+                                                                                                           y∈Y
+958
+959   To keep the same proposition out of both training and test folds, we group T-REx, Google-RE,
+960   CounterFact, and ZsRE by a canonicalized (subject, relation, answer) key. PopQA lacks subject and
+961   relation metadata, so it uses fact-disjoint folds.
+962   Probe accuracy may reflect regularities in the prompt or answer distribution rather than information
+963   in q̂f . We therefore compare BBRrep with three controls that do not see the query representation:
+964   hashed character trigrams of the prompt, the mean SmolLM2-360M input-token embedding of the
+965   prompt, and a prior that always predicts the most frequent gold answer. We report the margin over
+966   the strongest control and the Matthews correlation ϕ between BBRrep (f ) and BBR(f ).
+967   On T-REx and CounterFact, the probe recovers the gold answer for 35.1% and 48.0% of facts,
+968   compared with backbone recitation of 25.0% and 22.6%, and exceeds the strongest control by 5.6
+969   and 10.0 points. On Google-RE, the margin is 4.4 points. The evidence is weak on PopQA, with a
+970   margin of 0.3 points, and absent on ZsRE. Per-fact agreement between the probe and the backbone is
+971   low on every prompt set (ϕ ≤ 0.24). On several prompt sets, answer information can therefore be
+      decoded from the query representation even when the backbone does not recite the answer.
+
+
+                                                                                                  18
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+972
+973    Table 5: Adversarial re-insertion against the geometric deletion set Rgeo 0.85 (f ), in percent of F. rec
+                                                                                                                 geo
+
+974    is recitation after deletion and recadv is recitation after inserting one entry at offset ε outside the
+975    boundary. Gain∗ is the share of facts not recited after deletion that the entry restores, and Reg∗ is the
+976    share of facts still recited after deletion that are no longer recited after insertion.
+977                                                      ε = 0.01                 ε = 0.02                 ε = 0.05
+978           Dataset      Template       recgeo recadv Gain∗ Reg∗ recadv Gain∗ Reg∗ recadv Gain∗ Reg∗
+979           T-REx       verbatim         47.2   66.6      56.2    21.7   66.0      52.6    18.9   65.1      44.8    12.1
+980                       hyphenated              13.7       0.3    71.2   18.3       0.3    61.6   28.3       0.3    40.3
+                          letter-spaced           13.3       0.0    71.8   17.9       0.0    62.1   28.0       0.0    40.6
+981                       prefix-cue              13.3       0.0    71.8   17.9       0.0    62.1   28.0       0.0    40.6
+982           PopQA       verbatim         62.5   72.4      37.9     6.9   72.4      35.1     5.3   70.8      26.7     2.7
+                          hyphenated              49.7       1.4    21.4   52.6       1.1    16.6   58.1       0.7     7.6
+983                       letter-spaced           48.8       0.0    22.1   52.0       0.0    16.8   57.8       0.0     7.6
+984                       prefix-cue              48.8       0.0    22.1   52.0       0.0    16.8   57.8       0.0     7.6
+985           Google-RE verbatim           12.0   82.4      83.0    21.9   80.8      80.9    20.5   77.1      76.1    15.1
+                          hyphenated               1.0       0.0    91.8    2.0       0.0    83.6    4.3       0.0    64.4
+986                       letter-spaced            1.0       0.0    91.8    2.0       0.0    83.6    4.3       0.0    64.4
+987                       prefix-cue               1.0       0.0    91.8    2.0       0.0    83.6    4.3       0.0    64.4
+              CounterFact verbatim         59.0   79.4      68.2    12.8   78.4      64.8    12.2   75.7      55.1    10.0
+988                       hyphenated              17.1       0.0    71.0   21.8       0.0    63.0   32.7       0.0    44.6
+989                       letter-spaced           17.1       0.0    71.0   21.8       0.0    63.0   32.7       0.0    44.6
+                          prefix-cue              17.1       0.0    71.0   21.8       0.0    63.0   32.7       0.0    44.6
+990
+              ZsRE        verbatim         41.4   67.6      62.9    25.8   68.3      61.0    21.3   68.9      56.2    13.0
+991                       hyphenated              12.4       3.3    74.8   16.1       3.3    65.8   25.0       2.9    43.9
+992                       letter-spaced           10.3       0.9    76.5   14.1       0.9    67.3   23.2       0.7    44.8
+                          prefix-cue               9.6       0.0    76.8   13.4       0.0    67.6   22.7       0.0    45.0
+993
+994
+995
+       E.3    A DVERSARIAL RE - INSERTION
+996
+997    A geometric deletion can stop the model from reciting a fact without showing that the fact is robustly
+998    removed, since an answer-bearing entry may lie just outside the deletion set and still be retrieved. We
+999    test this under a database-administrator threat model, where the adversary knows the deletion radius
+1000   and can insert a single entry.
+1001   For a target fact f , we attack the geometric deletion set Rgeo
+                                                                   ρ (f ) at ρ = 0.85. The adversary inserts
+1002   an entry (ka , va ) whose key lies just outside the boundary:
+1003                                                √︁
+1004                                   ka = γ q̂f + 1 − γ 2 u,       γ = ρ − ε,
+1005
+       where u is a random unit vector orthogonal to q̂f . Then ⟨q̂f , ka ⟩ = γ < ρ, so the entry survives the
+1006
+       deletion while remaining close to the query. The value va either states af verbatim or uses one of
+1007   three templates designed to evade match: hyphenated (each word split by a hyphen), letter-spaced
+1008   (the answer spelled letter by letter), or prefix-cue (the first and last characters of the answer and its
+1009   length).
+1010                       (︁                  )︁
+       Let recgeo                       geo
+               ρ (f ) = rec f ; M \ Rρ (f ) be recitation after deletion, and
+1011
+                                recadv                         geo
+                                                  (︁ (︁                )︁             )︁
+1012
+                                   ρ,ε (f ) = rec f ; M \ Rρ (f ) ∪ {(ka , va )}                           (10)
+1013
+1014   recitation after the attack. Since post-attack recitation alone does not separate facts restored by the
+1015
+       attack from facts that survived deletion, we measure per-fact flips:
+                Gain(f ) = 1 − recgeo
+                                            )︁ adv
+                                                               Reg(f ) = recgeo              adv
+                             (︁                                                     (︁              )︁
+1016
+                                      ρ (f ) recρ,ε (f ),                    ρ (f ) 1 − recρ,ε (f ) .     (11)
+1017
+1018
+       Both are averaged over F, and we report the conditional forms
+1019                                                  Gain                             Reg
+                                          Gain∗ =              ,           Reg∗ =            ,
+1020                                                1 − recgeo
+                                                           ρ                          recgeo
+                                                                                         ρ
+1021
+1022
+       the share of facts not recited after deletion that the attack restores, and the share of facts still recited
+       after deletion that are no longer recited after insertion.
+1023
+1024   A single entry that states the answer verbatim reverses a large fraction of geometric deletions. At
+1025   ε = 0.01, Gain∗ ranges from 37.9% on PopQA to 83.0% on Google-RE. The three evading templates
+       restore almost nothing, at most 3.3%, but they still win retrieval and cause many facts that were
+
+
+                                                                    19
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1026                    removed without collateral                     never removed
+1027                    removed only with collateral                   not recited by reference model
+
+1028
+                                                                            82.8                                                    11.4    Co-LMLM
+1029
+             T-REx                             41.3                                                                                         SmolLM2-360M
+1030                                               46.8                                                                                     Std-LM-360M
+
+1031                                                                        82.7                                             15.9           Co-LMLM
+
+1032         PopQA                               45.1                                                                                       SmolLM2-360M
+                                        33.9                                                                                                Std-LM-360M
+1033
+                                                                                    99.5                                                    Co-LMLM
+1034    Google-RE             5.8                                                                                                           SmolLM2-360M
+                        3.0                                                                                                                 Std-LM-360M
+1035
+                                                                            82.2                                                    11.1    Co-LMLM
+1036
+       CounterFact                              43.6                                                                                        SmolLM2-360M
+1037                                             46.1                                                                                       Std-LM-360M
+
+1038                                                          62.7                                                 36.8                     Co-LMLM
+
+1039          ZsRE      12.7                                                                                                                SmolLM2-360M
+                                7.8                                                                                                         Std-LM-360M
+1040
+1041
+1042
+1043   Figure 5: Best outcome for each audited fact across the Co-LMLM geometric radius sweep. “Re-
+1044
+       moved without collateral” (G(f ) = 0) means that some radius makes the target no longer recited
+       without affecting a measured control fact. “Removed only with collateral” means that every radius
+1045
+       that makes the target no longer recited also affects at least one measured control fact. “Never removed”
+1046
+       means that the target remains recited at every swept radius. The reference models have no separable
+1047   memory; their dark bar is the share of the same facts they recite.
+1048
+1049
+1050   Table 6: Radius sweep split by backbone recitation. For facts with BBR(f ) = 1 and BBR(f ) = 0,
+1051   the table gives their number and the share that is no longer recited at some swept radius. For
+1052   BBR(f ) = 1, it also gives the share with G(f ) = 0.
+1053                                                                     BBR(f ) = 1                                   BBR(f ) = 0
+1054          Dataset                  |F|                n          removed at some ρ          G(f ) = 0         n       removed at some ρ
+1055
+              T-REx                   7,407        1,898                              55.9              49.5   5,509                        99.9
+1056          PopQA                     761           64                              84.4              53.1     697                        99.9
+1057          Google-RE                 608            1                               0.0               0.0     607                       100.0
+1058          CounterFact             3,479          843                              54.5              47.2   2,636                        99.9
+1059          ZsRE                    2,260           20                              70.0              20.0   2,240                       100.0
+1060
+1061
+1062   recited after deletion to no longer be recited, with Reg∗ between 21.4% and 91.8%. Their rates are
+1063
+       nearly identical across templates, so this disruption comes from winning retrieval rather than from
+       what the entry says. Moving the entry farther from the boundary weakens both effects, since it is
+1064
+       retrieved less often: on T-REx, verbatim Gain∗ falls from 56.2% to 44.8% between ε = 0.01 and
+1065
+       0.05. The verbatim entry mentions af and would be removed by the value rule, but the evading
+1066   templates are designed to escape it, and the value rule itself raises surviving-memory interference
+1067   (Table 12).
+1068
+1069   E.4     R ADIUS SWEEP
+1070
+1071   Figure 2 reports target removal E and collateral damage X (5) averaged over F. To summarize the
+1072   sweep per fact, we use
+1073                                G(f ) = min [(1 − E(f, ρ)) + X(f, ρ)] ,                       (12)
+                                                                        ρ
+1074
+1075   where ρ ranges over the six swept radii. G(f ) = 0 means that some radius makes the target no longer
+1076
+       recited without affecting any measured control fact.
+1077   On four prompt sets, 82–99% of targets have some radius that makes them no longer recited without
+1078   measured collateral damage; on ZsRE the corresponding rate is 62.7% (Figure 5). This does not show
+1079   that the fact has been removed from the backbone, because E only records whether the model recites
+       the fact under DEL-ON. Table 6 makes this distinction explicit. Among facts that the backbone
+
+
+                                                                                     20
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1080
+       recites without any memory, some swept radius still suppresses recitation for 55.9% on T-REx, 54.5%
+1081   on CounterFact, and 84.4% on PopQA. Geometric deletion can therefore appear successful because
+1082   surviving retrieval suppresses an answer that the backbone still recites.
+1083
+1084
+1085
+       F                NULL S -S PECIFIC A NALYSES
+1086
+       F.1              S OURCE ATTRIBUTION
+1087
+1088   Ghosal et al. (2026) argue that because source contributions remain disentangled, the effect of an
+1089   individual source can be measured by comparing NULLs with that source’s sink active and inactive.
+1090   We measure this effect by comparing the mask of the associated source (Section 3.2) with the mask
+1091   of an unrelated source (placebo source). NULLs instead uses the next-closest source as the inactive
+1092   condition, but because that source is selected for its similarity to the associated source, it may cover
+1093   the same fact.
+1094   Let sf denote the associated source of fact f and s̃f its placebo source, and let Fmap denote the facts
+1095   for which sf is a source of NULLs. For each fact, we compare how likely the model finds the gold
+1096   answer af under the two masks. Let ℓ(f ; s) measure, as a natural logarithm, how likely the model is
+1097   to answer af when the mask of source s is active. We define
+1098                                                                  1      ∑︂
+1099               δ(f ) = ℓ(f ; sf ) − ℓ(f ; s̃f ) ,  Accattr =                   1[δ(f ) > 0] .         (13)
+                                                                    |Fmap |
+                                                                                                  f ∈Fmap
+1100
+1101
+       If the associated source mask carries no information about the fact, δ is symmetric around zero and
+1102   Accattr = 1/2. A low Accattr does not necessarily contradict NULLs, which is designed so that facts
+1103   appearing in many sources are held by the shared backbone rather than by any single sink (Ghosal
+1104   et al., 2026).
+1105
+       The results from this analysis are reported in Figure 6 and Table 7.
+1106
+1107                           T-REx              PopQA                    Google-RE               CounterFact             ZsRE
+1108                      Acc attr = 51.2%    Acc attr = 58.1%            Acc attr = 50.1%        Acc attr = 51.0%    Acc attr = 51.8%
+1109
+
+       % of F map
+1110
+1111                5
+
+1112
+1113                0
+                         −2      0       2   −2      0       2         −2        0       2       −2      0       2   −2      0       2
+1114
+1115                                         δ(f): gold mask minus placebo mask, answer log-likelihood (nats)
+1116
+1117
+1118   Figure 6: Distribution of δ(f ) over Fmap for each prompt set. Positive values mean the associated
+1119   source mask makes the answer more likely than the placebo mask, and the vertical line marks
+1120   δ(f ) = 0. Accattr is the share of facts with δ(f ) > 0. Values beyond ±3 nats are collected in the
+1121   outer bins.
+1122
+1123   Table 7: Source attribution over Fmap . Accattr is in percent with Wilson 95% intervals (16), and the median of
+1124   δ is in nats.
+1125
+                                                                      n                Accattr    median δ
+1126
+1127                                         T-REx               20,938      51.2 [50.5, 51.8]        0.010
+1128                                         PopQA                2,181      58.1 [56.0, 60.1]        0.227
+                                             Google-RE            2,480      50.1 [48.1, 52.0]        0.003
+1129
+                                             CounterFact         17,484      51.0 [50.2, 51.7]        0.016
+1130                                         ZsRE                17,175      51.8 [51.1, 52.6]        0.043
+1131
+1132
+1133   On four of the five prompt sets, the associated source mask makes the answer more likely for only
+       50–52% of facts, close to the 1/2 expected if it carried no information. The median gain is at most
+
+
+                                                                            21
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1134
+       0.043 nats, meaning the associated source mask makes the answer at most about 4% more likely
+1135
+       than the placebo mask. Only PopQA shows a clearer effect, at 58.1%. Most facts in our prompt
+1136   sets therefore do not appear to be specific to their source article. This is consistent with Ghosal
+1137   et al. (2026), who state that information shared across sources is stored in a shared backbone. As a
+1138   consequence, post-deletion recitation PDR and backbone recitation BBR both depend mainly on
+1139   what the shared backbone can answer on its own, which explains why they are similar in Tables 1
+1140   and 11. Since the pre-deletion check keeps exactly the facts with δ(f ) > 0, the facts that pass it are
+1141   also close to the half of Fmap that falls on the positive side by chance, which Appendix C addresses
+1142   by tightening the margin.
+1143
+1144   F.2    E FFECT OF THE ASSOCIATED SOURCE
+1145
+       Source attribution asks whether the associated source mask makes the answer more likely. We now
+1146
+       ask whether it changes the answer the model generates. For each fact, we compare FULL, where only
+1147
+       the associated source mask is active, with DEL-OFF, where no source mask is active. We define:
+1148
+1149                               Gainown (f ) = recFULL (f ) (1 − recDEL-OFF (f )) ,
+                                                                                                                  (14)
+1150                               Lossown (f ) = (1 − recFULL (f )) recDEL-OFF (f ).
+1151
+       Gainown marks facts the model recites only with the associated source mask, and Lossown marks
+1152
+       facts it recites only without it. Reporting both rates, rather than only the difference in accuracy
+1153
+       between FULL and DEL-OFF, shows whether the associated source mask makes many answers
+1154   correct and many answers incorrect, or changes few answers at all.
+1155
+1156   We compute both rates over all facts that pass the pre-deletion check, since the audited cohort F
+1157
+       excludes every case of Lossown , and compare them with McNemar’s exact test (17). Table 8 reports
+       the results.
+1158
+1159   Table 8: Effect of the associated source over all facts that pass the pre-deletion check, in percent with Wilson
+1160   95% intervals (16). Gainown is recited under FULL only and Lossown is recited under DEL-OFF only. p is
+1161   McNemar’s exact test (17) of Gainown = Lossown .
+1162
+                                                 n       Gainown          Lossown                p
+1163
+                                                                                                −6
+1164                        T-REx           10,711    4.7 [4.3, 5.1]   3.4 [3.1, 3.8]    4.8 × 10
+1165                        PopQA            1,268    0.5 [0.2, 1.0]   2.1 [1.4, 3.0]    5.4 × 10−4
+1166
+                            Google-RE        1,242    1.0 [0.6, 1.8]   0.7 [0.4, 1.4]         0.523
+                            CounterFact      8,915    3.4 [3.1, 3.8]   1.6 [1.3, 1.8]   3.2 × 10−15
+1167
+                            ZsRE             8,901    0.6 [0.4, 0.7]   0.5 [0.4, 0.7]         0.679
+1168
+1169
+1170   Both Gainown and Lossown stay below 5% on every prompt set. This agrees with the source
+1171   attribution results, where the associated source mask barely changes how likely the answer is.
+1172
+1173   F.3    N EXT- CLOSEST VERSUS PLACEBO SOURCE
+1174
+1175   After the associated source is deleted, NULLs activates the next-closest source instead (Ghosal et al.,
+1176   2026). If the model still recites the fact, there are two possible reasons: the next-closest source also
+1177   holds the fact, or having any source mask active is enough. To tell these apart, we repeat DEL-ON
+1178   with the next-closest source replaced by the placebo source s̃f . The placebo is chosen from articles
+1179
+       that are unrelated to sf , and is therefore unlikely to contain the same fact. If the next-closest source
+       holds the fact, the model should recite it less often with the placebo. Let recplc (f ) be recitation under
+1180
+       this replacement. We compute surviving-memory support SMS and surviving-memory interference
+1181
+       SMI as in (3), with recplc in place of recDEL-ON :
+1182
+1183    SMSplc (f ) = recplc (f ) (1 − recDEL-OFF (f )) ,
+                                                    SMIplc (f ) = (1 − recplc (f )) recDEL-OFF (f ),
+1184                                                                                            (15)
+1185   and compare the two versions of DEL-ON with McNemar’s exact test (17). Table 9 reports the
+1186
+       results.
+1187
+
+
+
+                                                              22
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1188   Table 9: SMS and SMI over the audited cohort F with the next-closest source (DEL-ON) or a placebo source
+1189   unrelated to the associated source active after deletion, in percent with Wilson 95% intervals (16). Both are
+1190   compared with sinks-zero DEL-OFF. p is McNemar’s exact test (17) between the two conditions.
+1191
+1192                                       n                Next-closest              Placebo           p
+1193                    T-REx          2,669    SMS         8.1 [7.1, 9.1]       7.7 [6.7, 8.8]    0.284
+1194                                            SMI         8.4 [7.4, 9.5]      8.9 [7.9, 10.1]
+1195                    PopQA             22    SMS       13.6 [4.7, 33.3]      0.0 [0.0, 14.9]    0.021
+1196
+                                                SMI       13.6 [4.7, 33.3]    36.4 [19.7, 57.0]
+1197
+                        Google-RE         35    SMS        8.6 [3.0, 22.4]     17.1 [8.1, 32.7]    1.000
+                                                SMI       17.1 [8.1, 32.7]    22.9 [12.1, 39.0]
+1198
+                        CounterFact      791    SMS      17.3 [14.8, 20.1]    16.9 [14.5, 19.7]    0.840
+1199                                            SMI       11.8 [9.7, 14.2]     10.9 [8.9, 13.2]
+1200                    ZsRE              79    SMS      22.8 [14.9, 33.2]    19.0 [11.9, 29.0]    0.851
+1201                                            SMI      20.3 [12.9, 30.4]    19.0 [11.9, 29.0]
+1202
+1203
+1204   Replacing the next-closest source with the placebo leaves surviving-memory support SMS and
+1205   surviving-memory interference SMI largely unchanged, and McNemar’s test finds no significant
+1206   difference on any prompt set except PopQA, whose cohort contains only 22 facts. SMS and SMI in
+1207   NULLs therefore appear to depend little on which source remains active after deletion.
+1208   In short, the three analyses are consistent with the design described by Ghosal et al. (2026). The facts
+1209   in our prompt sets appear to be held mainly by the shared backbone rather than by individual source
+1210   sinks. For such facts, deleting a source leaves the answer largely unchanged. Whether the model
+1211   still recites a fact after deletion depends mostly on the shared backbone, not on the deleted or the
+1212   remaining source.
+1213
+1214
+       G     A DDITIONAL R ESULTS
+1215
+1216
+       Additional audit outcomes. Table 10 gives the full results behind Table 1, including FULL
+1217
+       accuracy and confidence intervals. Table 11 reports the same outcomes for PopQA and ZsRE.
+1218
+1219   Table 10: Full version of Table 1: outcomes under each system’s standard deletion rule (quantities defined
+1220   in Section 3.1), in percent of the audited cohort F, n = |F|. FULL is accuracy over the facts that pass the
+1221   pre-deletion check (Section 4.1). Reference models have no separable memory. Intervals are Wilson 95%
+1222   intervals (16). PopQA and ZsRE are in Table 11.
+1223
+                                                                 T-REx           Google-RE           CounterFact
+1224
+1225            Co-LMLM
+1226
+                n                                                7,407                    608               3,479
+                FULL                                   89.7 [89.0, 90.3]     96.1 [94.2, 97.3]    85.2 [84.0, 86.2]
+1227            Post-deletion recitation PDR              8.3 [7.7, 9.0]        0.3 [0.1, 1.2]       5.9 [5.1, 6.7]
+1228            Backbone recitation BBR                25.6 [24.6, 26.6]        0.2 [0.0, 0.9]    24.2 [22.8, 25.7]
+1229            Surviving-memory support SMS              1.5 [1.2, 1.8]        0.2 [0.0, 0.9]       1.6 [1.2, 2.1]
+1230            Surviving-memory interference SMI      18.8 [17.9, 19.7]        0.0 [0.0, 0.6]    19.9 [18.7, 21.3]
+1231
+                Spurious-deletion rate Φ               20.5 [19.5, 21.4]        0.0 [0.0, 0.6]    21.2 [19.8, 22.6]
+                SmolLM2-360M                           41.3 [40.2, 42.5]        5.8 [4.2, 7.9]    43.6 [42.0, 45.3]
+1232            Std-LM-360M                            46.8 [45.7, 47.9]        3.0 [1.9, 4.6]    46.1 [44.4, 47.7]
+1233
+                NULLs
+1234
+                n                                                2,669                     35                  791
+1235            FULL                                   24.9 [24.1, 25.7]        2.8 [2.0, 3.9]       8.9 [8.3, 9.5]
+1236            Post-deletion recitation PDR           80.7 [79.2, 82.2]     54.3 [38.2, 69.5]    67.1 [63.8, 70.3]
+1237            Backbone recitation BBR                81.1 [79.5, 82.5]     62.9 [46.3, 76.8]    61.6 [58.1, 64.9]
+1238            Surviving-memory support SMS              8.1 [7.1, 9.1]       8.6 [3.0, 22.4]    17.3 [14.8, 20.1]
+                Surviving-memory interference SMI         8.4 [7.4, 9.5]      17.1 [8.1, 32.7]     11.8 [9.7, 14.2]
+1239
+                Spurious-deletion rate Φ               43.7 [39.5, 48.0]     37.5 [18.5, 61.4]    35.8 [30.2, 41.8]
+1240            SmolLM2-1.7B                           82.2 [80.7, 83.6]     40.0 [25.6, 56.4]    64.7 [61.3, 68.0]
+1241
+
+
+
+                                                            23
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1242   Table 11: PopQA and ZsRE version of Table 10: outcomes under each system’s standard deletion rule (quantities
+1243   defined in Section 3.1), in percent of the audited cohort F, n = |F|. FULL is accuracy over the facts that pass
+1244   the pre-deletion check (Section 4.1). Reference models have no separable memory. Intervals are Wilson 95%
+1245   intervals (16).
+1246
+                                                                              PopQA                      ZsRE
+1247
+1248                     Co-LMLM
+                         n                                                         761                2,260
+1249
+                         FULL                                         76.0 [73.3, 78.6]     60.2 [58.6, 61.8]
+1250                     Post-deletion recitation PDR                    1.2 [0.6, 2.2]        0.8 [0.5, 1.3]
+1251                     Backbone recitation BBR                        8.4 [6.6, 10.6]        0.9 [0.6, 1.4]
+1252                     Surviving-memory support SMS                    0.9 [0.4, 1.9]        0.7 [0.4, 1.1]
+1253                     Surviving-memory interference SMI              8.1 [6.4, 10.3]        0.7 [0.4, 1.1]
+                         Spurious-deletion rate Φ                       8.2 [6.5, 10.4]        0.7 [0.4, 1.2]
+1254
+                         SmolLM2-360M                                 45.1 [41.6, 48.6]     12.7 [11.3, 14.1]
+1255                     Std-LM-360M                                  33.9 [30.6, 37.3]        7.8 [6.8, 9.0]
+1256
+                         NULLs
+1257
+                         n                                                          22                    79
+1258                     FULL                                            1.7 [1.1, 2.6]        0.9 [0.7, 1.1]
+1259                     Post-deletion recitation PDR                 72.7 [51.8, 86.8]     40.5 [30.4, 51.5]
+1260                     Backbone recitation BBR                      72.7 [51.8, 86.8]     38.0 [28.1, 49.0]
+1261                     Surviving-memory support SMS                  13.6 [4.7, 33.3]     22.8 [14.9, 33.2]
+                         Surviving-memory interference SMI             13.6 [4.7, 33.3]     20.3 [12.9, 30.4]
+1262
+                         Spurious-deletion rate Φ                     50.0 [18.8, 81.2]     34.0 [22.2, 48.3]
+1263                     SmolLM2-1.7B                                 68.2 [47.3, 83.6]     63.3 [52.3, 73.1]
+1264
+1265
+1266   On PopQA and ZsRE, Co-LMLM again has little recitation supported by surviving memory under
+1267   the standard deletion rule. On PopQA, surviving-memory interference is much larger than surviving-
+1268   memory support, so deletion often makes a fact unrecited even though the backbone can still recite it.
+1269   On ZsRE, both rates are below 1%. For NULLs, post-deletion recitation and backbone recitation
+1270   remain close on both prompt sets, consistent with many of these facts being recited by the shared
+1271
+       backbone rather than by a particular source memory. The NULLs cohorts are small, however, with
+       only 22 audited facts on PopQA and 79 on ZsRE, so these rates have wide confidence intervals and
+1272
+       should be interpreted cautiously.
+1273
+1274
+       Deletion-rule results. Tables 12 and 13 compare the deletion rules using surviving-memory support
+1275
+       and surviving-memory interference. The first measures how often the fact is still recited because
+1276   supporting memory remains outside the deletion set; the second measures how often the surviving
+1277   memory suppresses an answer that the backbone can recite.
+1278
+1279   Table 12: Surviving-memory support SMS and surviving-memory interference SMI (3) by deletion rule, in
+1280   percent of F, with Wilson 95% intervals (16). Each cell is SMS / SMI. The standard rules for Co-LMLM and
+1281
+       NULLs are marked with † and ‡, respectively. PopQA and ZsRE are reported in Table 13.
+1282
+                                                               T-REx                 Google-RE                     CounterFact
+1283
+1284      Co-LMLM
+          Oracle seed                                      36.3 / 6.7                  14.1 / 0.0                     46.0 / 5.7
+1285
+          {m⋆
+            f}                                 [35.2, 37.4] / [6.2, 7.3]   [11.6, 17.1] / [0.0, 0.6]      [44.4, 47.7] / [4.9, 6.5]
+1286
+          Geometric                                        30.0 / 8.4                  11.8 / 0.0                     41.7 / 7.0
+1287      Rgeo                                 [28.9, 31.0] / [7.8, 9.1]    [9.5, 14.7] / [0.0, 0.6]      [40.1, 43.4] / [6.2, 7.8]
+           0.85
+1288      Provenance                                       36.2 / 6.7                  13.8 / 0.0                     46.1 / 5.6
+1289      Rprov                                [35.1, 37.3] / [6.1, 7.2]   [11.3, 16.8] / [0.0, 0.6]      [44.4, 47.7] / [4.9, 6.4]
+1290      <FACT-q>                                         36.2 / 6.8                  14.1 / 0.0                     45.9 / 5.7
+1291      RFACT-q                              [35.1, 37.3] / [6.2, 7.4]   [11.6, 17.1] / [0.0, 0.6]      [44.3, 47.6] / [5.0, 6.6]
+1292      Value                                            1.5 / 18.6                     0.2 / 0.0                   1.5 / 19.9
+1293      Rval                                 [1.2, 1.8] / [17.8, 19.5]     [0.0, 0.9] / [0.0, 0.6]      [1.2, 2.0] / [18.6, 21.2]
+
+1294      Geometric ∪ value†                               1.5 / 18.8                     0.2 / 0.0                   1.6 / 19.9
+1295                                                                                                   continued on next page
+
+
+
+                                                                24
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1296                                          Table 12: Table 12 (continued).
+1297
+1298                                                          T-REx                     Google-RE                   CounterFact
+1299      Rgeo      val
+           0.85 ∪ R                           [1.2, 1.8] / [17.9, 19.7]       [0.0, 0.9] / [0.0, 0.6]     [1.2, 2.1] / [18.7, 21.3]
+1300      Geometric ∪ value ∪ provenance                  1.4 / 18.8                      0.2 / 0.0                      1.6 / 20.0
+1301      Rgeo
+           0.85 ∪ R
+                    val
+                        ∪ Rprov               [1.2, 1.7] / [17.9, 19.7]       [0.0, 0.9] / [0.0, 0.6]     [1.2, 2.1] / [18.7, 21.3]
+1302
+          NULLs
+1303
+          Provenance‡                                       8.1 / 8.4                    8.6 / 17.1                  17.3 / 11.8
+1304      Rprov                                 [7.1, 9.1] / [7.4, 9.5]     [3.0, 22.4] / [8.1, 32.7]    [14.8, 20.1] / [9.7, 14.2]
+1305      Geometric                                         8.1 / 8.3                    8.6 / 17.1                  17.2 / 10.4
+1306      Rgeo
+           4                                    [7.2, 9.2] / [7.3, 9.4]     [3.0, 22.4] / [8.1, 32.7]    [14.7, 20.0] / [8.4, 12.7]
+1307      Value                                             7.9 / 4.7                   11.4 / 11.4                      16.6 / 5.6
+1308      Rval                                  [6.9, 9.0] / [3.9, 5.6]     [4.5, 26.0] / [4.5, 26.0]     [14.1, 19.3] / [4.2, 7.4]
+1309      Geometric ∩ value                                 8.3 / 8.3                   11.4 / 14.3                  16.9 / 10.0
+1310      Rgeo
+           4   ∩ Rval                           [7.3, 9.4] / [7.3, 9.4]     [4.5, 26.0] / [6.3, 29.4]    [14.5, 19.7] / [8.1, 12.3]
+
+1311
+1312
+1313   Table 13: Surviving-memory support SMS and surviving-memory interference SMI by deletion rule on PopQA
+1314   and ZsRE, in percent of F, with Wilson 95% intervals (16). Each cell is SMS / SMI. Notation as in Table 12.
+1315
+1316                                                                        PopQA                             ZsRE
+1317                  Co-LMLM
+1318                  Oracle seed                                         67.3 / 1.2                     45.0 / 0.2
+1319                  {m⋆
+                        f}                                 [63.9, 70.5] / [0.6, 2.2]        [42.9, 47.0] / [0.1, 0.5]
+1320                  Geometric                                           56.2 / 2.1                     40.9 / 0.4
+1321                  Rgeo
+                       0.85                                [52.7, 59.7] / [1.3, 3.4]        [38.9, 42.9] / [0.2, 0.8]
+
+1322                  Provenance                                          67.4 / 1.2                     44.5 / 0.2
+                      Rprov                                [64.0, 70.6] / [0.6, 2.2]        [42.4, 46.5] / [0.1, 0.5]
+1323
+                      <FACT-q>                                            65.0 / 1.6                     44.7 / 0.2
+1324
+                      RFACT-q                              [61.6, 68.4] / [0.9, 2.7]        [42.7, 46.8] / [0.1, 0.5]
+1325
+                      Value                                                1.3 / 8.1                      0.8 / 0.7
+1326                  Rval                                   [0.7, 2.4] / [6.4, 10.3]          [0.5, 1.2] / [0.4, 1.1]
+1327
+                      Geometric ∪ value†                                   0.9 / 8.1                      0.7 / 0.7
+1328                  Rgeo      val
+                       0.85 ∪ R                              [0.4, 1.9] / [6.4, 10.3]          [0.4, 1.1] / [0.4, 1.1]
+1329                  Geometric ∪ value ∪ provenance                       0.9 / 8.1                      0.7 / 0.7
+1330                  Rgeo
+                       0.85 ∪ R
+                                val
+                                    ∪ Rprov                  [0.4, 1.9] / [6.4, 10.3]          [0.4, 1.1] / [0.4, 1.1]
+1331
+                      NULLs
+1332
+                      Provenance‡                                     13.6 / 13.6                       22.8 / 20.3
+1333                  Rprov                                [4.7, 33.3] / [4.7, 33.3]      [14.9, 33.2] / [12.9, 30.4]
+1334                  Geometric                                       13.6 / 13.6                       22.8 / 17.7
+1335                  Rgeo
+                       4                                   [4.7, 33.3] / [4.7, 33.3]      [14.9, 33.2] / [10.9, 27.6]
+1336                  Value                                               9.1 / 13.6                    12.7 / 19.0
+1337                  Rval                                 [2.5, 27.8] / [4.7, 33.3]       [7.0, 21.8] / [11.9, 29.0]
+1338                  Geometric ∩ value                               13.6 / 18.2                       22.8 / 17.7
+                      Rgeo ∩ Rval                          [4.7, 33.3] / [7.3, 38.5]      [14.9, 33.2] / [10.9, 27.6]
+1339                   4
+
+1340
+1341
+1342   For Co-LMLM, PopQA and ZsRE follow the same pattern as the main prompt sets. Rules that do not
+1343   use the answer text leave substantial surviving-memory support. The value rule, which explicitly uses
+1344   the answer text to identify entries, and the unions that contain it reduce surviving-memory support
+1345   to around 1% or below. On PopQA, this reduction is accompanied by more surviving-memory
+1346
+       interference; on ZsRE, both rates remain below 1%.
+1347   For NULLs, changing the deletion rule has a smaller and less consistent effect. The value rule lowers
+1348   surviving-memory support on both prompt sets, but combining it with the geometric rule does not
+1349   consistently reduce it further. These estimates are particularly uncertain on PopQA and ZsRE because
+       the audited cohorts are small.
+
+
+                                                               25
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1350
+       Additional deletion breadth results. Figure 7 shows the remaining deletion breadth for PopQA
+1351
+       and ZsRE. The other prompt sets are shown in Figure 2.
+1352
+1353
+                                           PopQA         ZsRE      E (target removed)          X (collateral)
+1354
+1355                                  Co-LMLM                                                           NULLs
+            100
+1356
+1357
+                80
+1358
+1359
+                60
+1360
+       % of F
+1361
+                40
+1362
+1363
+1364            20
+
+1365
+1366             0
+                 0.95     0.90      0.85        0.80       0.75       0.70   1             2                4        8          16
+1367                         cosine threshold ρ (broader → )                            sources removed k (broader → )
+1368
+1369
+1370   Figure 7: Effect of increasing deletion breadth on PopQA and ZsRE. Quantities and intervals are
+1371   defined as in Figure 2. For NULLs, both prompt sets had too few control facts for X to be plotted.
+1372
+1373
+       For Co-LMLM, broader geometric deletion steadily increases target removal on both PopQA and
+1374
+       ZsRE. Measured collateral damage remains much smaller, although it increases at the broadest
+1375   settings. For NULLs, increasing the number of removed sources does not produce a consistent
+1376   improvement: target removal fluctuates on PopQA and remains roughly stable on ZsRE, with wide
+1377   confidence intervals. We do not report collateral damage for these NULLs prompt sets because too
+1378   few control facts were available. Broader source-level deletion therefore does not reliably remove
+1379   more targets on either prompt set.
+1380
+1381
+       H         AUDIT C ONFIGURATION
+1382
+1383
+                                   Table 14: Audit configuration. Ranges span the five datasets.
+1384
+1385
+                 Group                        Setting                              Value
+1386
+                 Shared                       Datasets                             T-REx, PopQA, Google-RE, Counter-
+1387
+                                                                                   Fact, ZsRE
+1388                                          Prompts per dataset                  full released sets, 2,766–27,630
+1389                                          Decoding / max new tokens            greedy / 12
+1390                                          Global seed                          0
+1391             Co-LMLM
+1392             Models & index               Audited checkpoint                   lil-lab/CoLMLM-360M-FW
+1393                                          Reference models                     HuggingFaceTB/
+1394
+                                                                                   SmolLM2-360M;            lil-lab/
+                                                                                   CoLMLM-Standard-LM-Baseline-360M-FW
+1395                                                                               (scored on the same audited facts; the
+1396                                                                               three conditions coincide, so PDR =
+1397                                                                               BBR and SMS = SMI = 0)
+1398                                          Memory store                         lil-lab/
+                                                                                   co-lmlm-360m-fw-fineweb-wiki-index,
+1399
+                                                                                   ∼2.2B entries (1.07 TB)
+1400                                          Retrieval threshold τ                0.7
+1401                                          Retrieval top-k                      1
+1402             Deletion rule                Standard rule                        geometric ∪ value
+1403                                                                                                   continued on next page
+
+
+                                                                   26
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1404                                   Table 14: Audit configuration (continued).
+1405
+1406        Group                      Setting                         Value
+1407                                   Geometric radius ρ              0.85
+1408                                   Max deletion-set size           10,000
+1409                                   Deletion rules                  oracle seed; geometric; value; prove-
+                                                                       nance; hybrid (geometric ∪ value ∪
+1410
+                                                                       provenance); <FACT-q>
+1411
+            <FACT-q>                   Question generator              lil-lab/
+1412
+                                                                       CoLMLM-Question-Generator
+1413                                                                   (LoRA) over Qwen/Qwen2.5-1.
+1414                                                                   5B-Instruct; audit prompts never
+1415                                                                   shown to the generator
+1416
+                                       Sampling                        1 greedy + 10 sampled (temperature
+                                                                       0.8, top-p 0.95); 5 deduplicated ques-
+1417                                                                   tions kept
+1418                                   Query embedding                 Co-LMLM <FACT-q> head
+1419                                   Retrieval threshold             0.7
+1420        DEL-OFF                    Default                         null-retrieval
+1421                                   Sensitivity                     forbid-token
+1422        Answer density             Envelope / cap                  top-500 by cosine to q̂f ;        right-
+1423                                                                   censored at cap
+                                       Binning                         dataset-specific quartiles
+1424
+1425        Radius sweep               Radii ρ                         {0.95, 0.90, 0.85, 0.80, 0.75, 0.70}
+                                       Neighbor ball (cosine)          0.5
+1426                                   Neighbor cap / min count        20 / 5
+1427
+            Representation probe       Estimator                       ridge regression (ranking)
+1428                                   Ridge λ                         1.0
+1429                                   Folds                           5, proposition-disjoint (fact-disjoint
+1430                                                                   on PopQA)
+1431
+                                       Answer features                 hashed char n-grams, dim 2,048
+                                       Candidate answers               284–1,960
+1432                                   Prompt-only controls            prompt char-trigrams (dim 2,048);
+1433                                                                   mean prompt input-token embeddings
+1434                                                                   (SmolLM2-360M input table); gold-
+1435
+                                                                       answer prior
+1436        Adversarial re-insertion   Attacked deletion set           geometric, ρ = 0.85
+1437
+                                       Offsets ε                       {0.01, 0.02, 0.05}
+                                       Templates                       verbatim, hyphenated, letter-spaced,
+1438                                                                   prefix-cue
+1439                                   Inserted entries                1
+1440        NULLs
+1441
+            Models                     Audited checkpoint              gauravrghosal/
+1442                                                                   NULLS-Wikipedia-Full
+1443                                                                   (1B, 6,407,814 sources)
+1444                                   Reference model                 HuggingFaceTB/SmolLM2-1.
+1445
+                                                                       7B
+                                       Backbone / sink pool neurons    500 / 7,692 per layer (released config-
+1446                                                                   uration)
+1447                                   Sink activation probability     0.013 (∼100 active sinks per source)
+1448                                   Context length                  1,024
+1449        Cohort                     Source mapping                  subject article title, exact or
+1450                                                                   MediaWiki-normalized match
+                                       Verification gate               answer log-likelihood, associated-
+1451
+                                                                       source mask vs. placebo mask; margin
+1452                                                                   0
+1453                                   Placebo source                  deterministic; cosine to associated
+1454                                                                   source at most 0.5
+                                       Facts after gate                1,242–10,711
+1455
+1456        DEL-ON routing             Activated source                next-closest surviving source (from a
+                                                                       top-5 list)
+1457
+                                                                                        continued on next page
+
+
+                                                             27
+       Under review as a conference paper at ICLR 2027
+
+
+
+
+1458                                  Table 14: Audit configuration (continued).
+1459
+1460        Group                    Setting                          Value
+1461                                 Routing encoder                  sentence-transformers/
+1462                                                                  all-MiniLM-L6-v2 over article
+1463                                                                  titles
+                                     Excluded neurons                 union of the masks in the deletion set
+1464
+1465        Deletion rule            Standard rule                    provenance (the associated source)
+                                     Geometric-rule encoder           sentence-transformers/
+1466                                                                  all-mpnet-base-v2
+1467                                 Deletion rules                   provenance; geometric (k = 4); value
+1468                                                                  (envelope K = 500); geometric ∩
+1469                                                                  value (k = 4)
+                                     Breadth sweep k                  {1, 2, 4, 8, 16}
+1470
+1471        DEL-OFF                  Default                          sinks-zero (backbone only)
+                                     Sensitivity                      placebo-sink
+1472
+1473
+1474
+1475
+       I   S TATISTICAL U NCERTAINTY
+1476
+1477
+       For a rate p̂ estimated on n facts, we use the Wilson score interval (Wilson, 1927)
+                                 [︄             √︃                  ]︄
+1478                      1              z2        p̂ (1 − p̂)   z2
+1479                                p̂ +    ± z                + 2 ,        z = z1−α/2 = 1.96.                 (16)
+                      1 + z 2 /n         2n             n       4n
+1480
+1481   The interval contains the rates that are consistent with the observed count at the 95% level, and
+1482   its width decreases with n. It remains inside [0, 1] and does not collapse to zero width near the
+1483   boundaries.
+1484
+       Paired comparisons on shared facts use McNemar tests (McNemar, 1947). Writing b and c for the
+1485
+       discordant counts, the two-sided exact p-value is
+1486                                       ⎛                                   ⎞
+1487                                               min(b,c) (︃       )︃
+                                                    ∑︂         b + c
+1488                               p = min⎝1, 2                        2−(b+c) ⎠ .              (17)
+                                                                 k
+1489                                                   k=0
+1490
+       Here, b is the number of facts correct under the first condition only and c the number correct under
+1491
+       the second condition only. A small p indicates that the two conditions differ on more facts than would
+1492   be expected by chance, and facts on which they agree do not enter the test.
+1493
+1494
+1495
+1496
+1497
+1498
+1499
+1500
+1501
+1502
+1503
+1504
+1505
+1506
+1507
+1508
+1509
+1510
+1511
+
+
+
+                                                         28
+
